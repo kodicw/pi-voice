@@ -1,0 +1,13 @@
+{
+  "name": "pi-voice",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Speech-to-text and text-to-speech extension for pi",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
