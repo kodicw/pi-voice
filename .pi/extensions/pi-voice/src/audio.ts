@@ -229,41 +229,44 @@ export function stopRecording(state: RecordingState): Promise<string> {
   });
 }
 
-/** Read a file as base64 */
 export function readFileBase64(path: string): string {
   return readFileSync(path).toString("base64");
 }
 
-/** Convert audio to WAV if needed, returning the WAV path */
 export function ensureWav(inputPath: string, ext: string): string {
   if (ext === "wav") return inputPath;
 
   const wavPath = inputPath.replace(/\.[^.]+$/, ".wav");
+  let success = false;
+  try {
+    if (hasCmd("ffmpeg")) {
+      execFileSync("ffmpeg", [
+        "-f", "s16le", "-ar", "16000", "-ac", "1",
+        "-i", inputPath,
+        "-y", wavPath,
+      ], { stdio: "ignore", timeout: 10000 });
+      success = true;
+      return wavPath;
+    }
 
-  if (hasCmd("ffmpeg")) {
-    execFileSync("ffmpeg", [
-      "-f", "s16le", "-ar", "16000", "-ac", "1",
-      "-i", inputPath,
-      "-y", wavPath,
-    ], { stdio: "ignore", timeout: 10000 });
-    try { unlinkSync(inputPath); } catch { /* */ }
-    return wavPath;
+    if (hasCmd("sox")) {
+      execFileSync("sox", [
+        "-t", "raw", "-r", "16000", "-b", "16", "-e", "signed", "-c", "1",
+        inputPath,
+        wavPath,
+      ], { stdio: "ignore", timeout: 10000 });
+      success = true;
+      return wavPath;
+    }
+
+    throw new Error("Cannot convert raw audio to WAV. Install ffmpeg or sox.");
+  } finally {
+    if (success) {
+      try { unlinkSync(inputPath); } catch { /* */ }
+    }
   }
-
-  if (hasCmd("sox")) {
-    execFileSync("sox", [
-      "-t", "raw", "-r", "16000", "-b", "16", "-e", "signed", "-c", "1",
-      inputPath,
-      wavPath,
-    ], { stdio: "ignore", timeout: 10000 });
-    try { unlinkSync(inputPath); } catch { /* */ }
-    return wavPath;
-  }
-
-  throw new Error("Cannot convert raw audio to WAV. Install ffmpeg or sox.");
 }
 
-/** Play a WAV file */
 export function playWav(path: string, player: AudioPlayer): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(player.cmd, player.args(path), { stdio: "ignore" });

@@ -797,9 +797,7 @@ async function handleAgentEnd(
     piper = detectPiper(); // refresh
     const speechText = humanizeForSpeech(textToSpeak);
     if (!speechText.trim()) {
-      if (ctx.hasUI) {
-        notify(ctx as any, "Nothing to speak after cleaning.", "warning");
-      }
+      notify(ctx as any, "Nothing to speak after cleaning.", "warning");
       return;
     }
     if (piper.available && audio.canPlay && audio.player) {
@@ -810,9 +808,7 @@ async function handleAgentEnd(
       await speakViaEspeak(speechText, audio.player, 175);
     }
   } catch (err: any) {
-    if (ctx.hasUI) {
-      notify(ctx as any, `TTS failed: ${err.message}`, "warning");
-    }
+    notify(ctx as any, `TTS failed: ${err.message}`, "warning");
   }
 }
 
@@ -859,8 +855,11 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
     description: "Read the last assistant message aloud (TTS)",
     handler: async (_args, ctx) => {
       pendingSpeakRequest = true;
-      await handleAgentEnd(pi, ctx as unknown as ExtensionContext);
-      pendingSpeakRequest = false;
+      try {
+        await handleAgentEnd(pi, ctx as unknown as ExtensionContext);
+      } finally {
+        pendingSpeakRequest = false;
+      }
     },
   });
 
@@ -892,13 +891,11 @@ async function showStartupStatus(
     parts.push("cloud —");
   }
 
-  if (ctx.hasUI) {
-    notify(
-      ctx as any,
-      `Voice: ${parts.join(" | ")}  •  /voice-diagnose for details`,
-      "info",
-    );
-  }
+  notify(
+    ctx as any,
+    `Voice: ${parts.join(" | ")}  •  /voice-diagnose for details`,
+    "info",
+  );
 }
 
 async function runAsyncSafe(fn: () => Promise<void>): Promise<void> {

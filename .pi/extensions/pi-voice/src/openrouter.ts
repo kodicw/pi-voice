@@ -121,12 +121,4 @@ export async function summarizeText(
   return result;
 }
 
-/**
- * Convert text to speech …?  OpenRouter doesn't have a TTS endpoint natively.
- * We use espeak-ng locally. If not available, we return null.
- * In the future, could use OpenAI-compatible TTS via OpenRouter if they add it.
- */
-export async function textToSpeechAvailable(): Promise<boolean> {
-  const { hasCmd } = await import("./audio.js");
-  return hasCmd("espeak-ng") || hasCmd("espeak");
-}
+

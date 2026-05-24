@@ -140,8 +140,8 @@ Settings are stored in the pi session tree (`voice-settings` custom entry) and s
 ```typescript
 autoTts: true          // speak after every agent response
 tldrMode: true         // summarize before speaking
-sttModel: "google/gemini-2.5-flash-preview"  // cloud fallback only
-summaryModel: "google/gemini-2.5-flash-preview"
+sttModel: "openai/whisper-large-v3"  // cloud fallback only
+summaryModel: "openai/gpt-4o-mini"
 maxRecordSeconds: 60
 language: "en"
 ```

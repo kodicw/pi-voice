@@ -15,14 +15,7 @@ import { hasCmd } from "./audio.js";
 // ─── Performance config ─────────────────────────────────────────────────────
 
 /** Use all available CPU cores (whisper default is 4). Contains to 1-16. */
-const OPTIMAL_THREADS = (function getThreads(): number {
-  let n = 4;
-  try {
-    const c = cpus();
-    if (c && c.length > 0) n = c.length;
-  } catch { /* */ }
-  return Math.max(Math.min(n, 16), 1);
-})();
+const OPTIMAL_THREADS = Math.max(1, Math.min(cpus() && cpus().length ? cpus().length : 4, 16));
 
 // ─── Whisper (local STT) ────────────────────────────────────────────────────
 
@@ -146,6 +139,12 @@ export function detectPiper(): PiperStatus {
   let best: PiperStatus | null = null;
   const qualityRank: Record<string, number> = { high: 3, medium: 2, low: 1, x_low: 0 };
 
+  function voiceQuality(voiceName: string): number {
+    const parts = voiceName.split("-");
+    const raw = parts[parts.length - 1];
+    return qualityRank[raw ? raw.toLowerCase() : "medium"] || 1;
+  }
+
   for (const dir of PIPER_MODEL_DIRS) {
     if (!existsSync(dir)) continue;
     try {
@@ -158,11 +157,7 @@ export function detectPiper(): PiperStatus {
         const configPath = modelPath.replace(".onnx", ".onnx.json");
         if (!existsSync(configPath)) continue;
 
-        // Parse quality tier from voice name (last segment after dash)
-        const parts = voiceName.split("-");
-        const rawQuality = parts[parts.length - 1];
-        const quality = rawQuality ? rawQuality.toLowerCase() : "medium";
-        const rank = qualityRank[quality] || 1;
+        const rank = voiceQuality(voiceName);
 
         const candidate: PiperStatus = {
           available: true,
@@ -172,14 +167,7 @@ export function detectPiper(): PiperStatus {
           voiceName,
         };
 
-        // Compare with current best
-        let bestRank = 0;
-        if (best && best.voiceName) {
-          const bestParts = best.voiceName.split("-");
-          const bestRaw = bestParts[bestParts.length - 1];
-          const bestQuality = bestRaw ? bestRaw.toLowerCase() : "medium";
-          bestRank = qualityRank[bestQuality] || 1;
-        }
+        const bestRank = best && best.voiceName ? voiceQuality(best.voiceName) : 0;
 
         if (!best || rank > bestRank) {
           best = candidate;
