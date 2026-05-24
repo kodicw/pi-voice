@@ -729,30 +729,90 @@ async function runVoiceSettings(
   }
 }
 
+// ─── Overlay: Speaking ───────────────────────────────────────────────────
+
+async function showSpeakingOverlay(
+  ctx: ExtensionCommandContext,
+  speechText: string,
+  wavPath: string,
+): Promise<void> {
+  const startTime = Date.now();
+  let playbackDone = false;
+
+  playWav(wavPath, audio.player!).then(function () {
+    playbackDone = true;
+  }).catch(function () {
+    playbackDone = true;
+  });
+
+  await ctx.ui.custom(
+    function (_tui, theme, _kb, done) {
+      var closed = false;
+
+      var checkDone = setInterval(function () {
+        if (playbackDone && !closed) {
+          closed = true;
+          clearInterval(checkDone);
+          done(undefined);
+        }
+      }, 200);
+
+      return {
+        render: function (_width: number): string[] {
+          var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          var preview = speechText.substring(0, 120) + (speechText.length > 120 ? "..." : "");
+          var lines: string[] = [
+            theme.fg("accent", theme.bold("🔊 Speaker")),
+            "",
+            playbackDone
+              ? theme.fg("green", "✓ Done speaking")
+              : "Playing... (" + elapsed + "s)",
+            "",
+          ];
+          lines.push(theme.fg("dim", preview));
+          lines.push("");
+          lines.push(theme.fg("dim", playbackDone ? "Auto-closing..." : "Esc to stop"));
+          return lines;
+        },
+        invalidate: function () {},
+        handleInput: function (data: string) {
+          if (matchesKey(data, "escape") && !closed) {
+            closed = true;
+            clearInterval(checkDone);
+            done(undefined);
+          }
+        },
+      };
+    },
+    { overlay: true, overlayOptions: { anchor: "top-right", width: "38%" } },
+  );
+}
+
 // ─── Auto-TTS + /speak ──────────────────────────────────────────────────────
 
 async function handleAgentEnd(
   _pi: ExtensionAPI,
   ctx: ExtensionContext,
-): Promise<void> {
+  showOverlay?: boolean,
+): Promise<string | undefined> {
   if (!settings.autoTts && !pendingSpeakRequest) return;
 
   // Extract last assistant text
-  let lastAssistantText = "";
+  var lastAssistantText = "";
   try {
-    const branch = ctx.sessionManager.getBranch();
-    for (let i = branch.length - 1; i >= 0; i--) {
-      const entry = branch[i];
+    var branch = ctx.sessionManager.getBranch();
+    for (var i = branch.length - 1; i >= 0; i--) {
+      var entry = branch[i];
       if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
-        const content = entry.message.content;
+        var content = entry.message.content;
         if (typeof content === "string") {
           lastAssistantText = content;
         } else if (Array.isArray(content)) {
-          const texts: string[] = [];
-          for (let j = 0; j < content.length; j++) {
-            const part = content[j];
+          var texts: string[] = [];
+          for (var j = 0; j < content.length; j++) {
+            var part = content[j];
             if (part && typeof part === "object" && (part as any).type === "text") {
-              const rawText = (part as any).text;
+              var rawText = (part as any).text;
               if (rawText) texts.push(rawText);
             }
           }
@@ -764,7 +824,7 @@ async function handleAgentEnd(
   } catch (err: any) {
     notify(
       ctx as any,
-      `[pi-voice] Failed to read conversation: ${err.message}`,
+      "[pi-voice] Failed to read conversation: " + err.message,
       "error",
     );
     return;
@@ -772,14 +832,14 @@ async function handleAgentEnd(
 
   if (!lastAssistantText.trim()) return;
 
-  let textToSpeak = lastAssistantText.trim();
+  var textToSpeak = lastAssistantText.trim();
 
   // TL;DR via OpenRouter, or simple truncation
   if (settings.tldrMode) {
-    let summarized = false;
+    var summarized = false;
     try {
-      const apiKey = await resolveOpenRouterKey(ctx);
-      const tldr = await summarizeText(apiKey, lastAssistantText, settings.summaryModel);
+      var apiKey = await resolveOpenRouterKey(ctx);
+      var tldr = await summarizeText(apiKey, lastAssistantText, settings.summaryModel);
       if (tldr && tldr.trim()) {
         textToSpeak = tldr.trim();
         summarized = true;
@@ -795,20 +855,25 @@ async function handleAgentEnd(
   // Speak via piper → espeak fallback (humanize text first)
   try {
     piper = detectPiper(); // refresh
-    const speechText = humanizeForSpeech(textToSpeak);
+    var speechText = humanizeForSpeech(textToSpeak);
     if (!speechText.trim()) {
       notify(ctx as any, "Nothing to speak after cleaning.", "warning");
-      return;
+      return speechText;
     }
     if (piper.available && audio.canPlay && audio.player) {
-      const wavPath = await speakWithPiper(speechText, piper);
-      await playWav(wavPath, audio.player);
+      var wavPath = await speakWithPiper(speechText, piper);
+      if (showOverlay && ctx.hasUI) {
+        await showSpeakingOverlay(ctx as any, speechText, wavPath);
+      } else {
+        await playWav(wavPath, audio.player);
+      }
       try { unlinkSync(wavPath); } catch { /* */ }
     } else if (audio.hasEspeak && audio.canPlay && audio.player) {
       await speakViaEspeak(speechText, audio.player, 175);
     }
+    return speechText;
   } catch (err: any) {
-    notify(ctx as any, `TTS failed: ${err.message}`, "warning");
+    notify(ctx as any, "TTS failed: " + err.message, "warning");
   }
 }
 
