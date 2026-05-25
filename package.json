@@ -1,0 +1,9 @@
+{
+  "name": "pi-voice",
+  "version": "1.0.0",
+  "description": "Local speech-to-text and text-to-speech for pi-coding-agent",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [".pi/extensions"]
+  }
+}
