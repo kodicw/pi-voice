@@ -652,11 +652,12 @@ async function runVoiceSettings(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   if (!ctx.hasUI) {
+    const eff = getEffectiveSummaryModel(ctx);
     console.log("Voice Settings (print mode):");
     console.log(`  autoTts:          ${settings.autoTts}`);
     console.log(`  tldrMode:         ${settings.tldrMode}`);
     console.log(`  sttModel:         ${settings.sttModel}`);
-    console.log(`  summaryModel:     ${settings.summaryModel}`);
+    console.log(`  summaryModel:     ${eff}  (fallback: ${settings.summaryModel})`);
     console.log(`  maxRecordSeconds: ${settings.maxRecordSeconds}`);
     console.log(`  language:         ${settings.language}`);
     return;
@@ -668,7 +669,7 @@ async function runVoiceSettings(
     { id: "autoTts", label: "Auto TTS", value: String(settings.autoTts) },
     { id: "tldrMode", label: "TL;DR mode", value: String(settings.tldrMode) },
     { id: "sttModel", label: "STT model (cloud fallback)", value: settings.sttModel },
-    { id: "summaryModel", label: "Summary model", value: settings.summaryModel },
+    { id: "summaryModel", label: "Summary model", value: getEffectiveSummaryModel(ctx) },
     { id: "maxRecordSeconds", label: "Max record (s)", value: String(settings.maxRecordSeconds) },
     { id: "language", label: "Language", value: settings.language },
   ];
@@ -834,6 +835,22 @@ function resolveSummaryModel(ctx: ExtensionContext): string {
     // Ignore errors accessing the model registry
   }
   return settings.summaryModel;
+}
+
+/**
+ * Get a human-readable string showing the effective summary model.
+ * Returns something like "auto (deepseek-v4-flash)" or "openai/gpt-4o-mini" (fallback).
+ */
+function getEffectiveSummaryModel(ctx: ExtensionContext): string {
+  try {
+    const currentModel = ctx.getModel();
+    if (currentModel?.id) {
+      return `auto (${currentModel.id})`;
+    }
+  } catch {
+    // Ignore
+  }
+  return `${settings.summaryModel} (fallback)`;
 }
 
 /**
