@@ -5,7 +5,7 @@
  * TTS: piper-tts (neural) → espeak-ng (fallback)
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,16 +59,21 @@ export function detectWhisper(): WhisperStatus {
   return { available: false, cli, modelPath: null, modelName: null };
 }
 
-export function transcribeWithWhisper(wavPath: string, status: WhisperStatus): string {
-  if (!status.available || !status.cli || !status.modelPath) {
-    throw new Error("whisper.cpp not configured. Run setup-voice-models or /voice-diagnose.");
-  }
+export function transcribeWithWhisper(
+  wavPath: string,
+  status: WhisperStatus,
+  signal?: AbortSignal,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!status.available || !status.cli || !status.modelPath) {
+      reject(new Error("whisper.cpp not configured. Run setup-voice-models or /voice-diagnose."));
+      return;
+    }
 
-  const outPrefix = join(tmpdir(), `whisper-out-${Date.now()}`);
-  const txtPath = outPrefix + ".txt";
+    const outPrefix = join(tmpdir(), `whisper-out-${Date.now()}`);
+    const txtPath = outPrefix + ".txt";
 
-  try {
-    execFileSync(
+    execFile(
       status.cli,
       [
         "-m", status.modelPath,
@@ -79,29 +84,34 @@ export function transcribeWithWhisper(wavPath: string, status: WhisperStatus): s
         "--language", "en",
         "--no-timestamps",
         // ---- Performance tuning ----
-        "--threads", String(OPTIMAL_THREADS), // use all cores (~36% faster)
-        "--beam-size", "1",                   // greedy decode: ~12% faster
-        "--best-of", "1",                     // single best candidate
+        "--threads", String(OPTIMAL_THREADS),
+        "--beam-size", "1",
+        "--best-of", "1",
       ],
-      { stdio: "pipe", timeout: 120000, encoding: "utf8" },
+      { encoding: "utf8", signal, timeout: 120000 } as any,
+      (err: Error | null) => {
+        // whisper-cli may exit non-zero but still write output
+        if (existsSync(txtPath)) {
+          try {
+            const text = readFileSync(txtPath, "utf8").trim();
+            try { unlinkSync(txtPath); } catch { /* */ }
+            if (text) {
+              resolve(text);
+              return;
+            }
+          } catch { /* file not readable */ }
+        }
+
+        try { unlinkSync(txtPath); } catch { /* */ }
+
+        if (err) {
+          reject(new Error(`whisper-cli failed: ${err.message}`));
+        } else {
+          reject(new Error("whisper-cli produced no output."));
+        }
+      },
     );
-  } catch (err: any) {
-    // whisper-cli may exit non-zero but still write output
-    if (existsSync(txtPath)) {
-      const text = readFileSync(txtPath, "utf8").trim();
-      try { unlinkSync(txtPath); } catch { /* */ }
-      if (text) return text;
-    }
-    throw new Error(`whisper-cli failed: ${err.message || err}`);
-  }
-
-  if (!existsSync(txtPath)) {
-    throw new Error("whisper-cli produced no output.");
-  }
-
-  const text = readFileSync(txtPath, "utf8").trim();
-  try { unlinkSync(txtPath); } catch { /* */ }
-  return text;
+  });
 }
 
 export function normalizeTranscript(text: string): string {

@@ -33,18 +33,20 @@ import {
   startRecording,
   stopRecording,
 } from "./audio.js";
-import { humanizeForSpeech } from "./humanize.js";
 import {
   detectPiper,
   detectWhisper,
   normalizeTranscript,
   speakWithPiper,
   transcribeWithWhisper,
-  truncateForSpeech,
   type PiperStatus,
   type WhisperStatus,
 } from "./local.js";
 import { DEFAULT_SETTINGS, type VoiceSettings } from "./types.js";
+import {
+  speakText,
+  enqueueTts,
+} from "./tts-queue.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -60,8 +62,6 @@ let audio = detectAudioBackends();
 let whisper: WhisperStatus = detectWhisper();
 let piper: PiperStatus = detectPiper();
 let activeCtx: ExtensionContext | undefined;
-let pendingSpeakRequest = false;
-
 // ─── Settings Persistence ───────────────────────────────────────────────────
 
 function persistSettings(pi: ExtensionAPI): void {
@@ -342,7 +342,7 @@ async function runVoiceCommand(
 
   try {
     if (whisper.available) {
-      const rawTranscript = transcribeWithWhisper(wavPath, whisper);
+      const rawTranscript = await transcribeWithWhisper(wavPath, whisper);
       transcript = normalizeTranscript(rawTranscript);
     } else {
       // Fallback to OpenRouter STT
@@ -729,151 +729,89 @@ async function runVoiceSettings(
   }
 }
 
-// ─── Overlay: Speaking ───────────────────────────────────────────────────
-
-async function showSpeakingOverlay(
-  ctx: ExtensionCommandContext,
-  speechText: string,
-  wavPath: string,
-): Promise<void> {
-  const startTime = Date.now();
-  let playbackDone = false;
-
-  playWav(wavPath, audio.player!).then(function () {
-    playbackDone = true;
-  }).catch(function () {
-    playbackDone = true;
-  });
-
-  await ctx.ui.custom(
-    function (_tui, theme, _kb, done) {
-      var closed = false;
-
-      var checkDone = setInterval(function () {
-        if (playbackDone && !closed) {
-          closed = true;
-          clearInterval(checkDone);
-          done(undefined);
-        }
-      }, 200);
-
-      return {
-        render: function (_width: number): string[] {
-          var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          var preview = speechText.substring(0, 120) + (speechText.length > 120 ? "..." : "");
-          var lines: string[] = [
-            theme.fg("accent", theme.bold("🔊 Speaker")),
-            "",
-            playbackDone
-              ? theme.fg("green", "✓ Done speaking")
-              : "Playing... (" + elapsed + "s)",
-            "",
-          ];
-          lines.push(theme.fg("dim", preview));
-          lines.push("");
-          lines.push(theme.fg("dim", playbackDone ? "Auto-closing..." : "Esc to stop"));
-          return lines;
-        },
-        invalidate: function () {},
-        handleInput: function (data: string) {
-          if (matchesKey(data, "escape") && !closed) {
-            closed = true;
-            clearInterval(checkDone);
-            done(undefined);
-          }
-        },
-      };
-    },
-    { overlay: true, overlayOptions: { anchor: "top-right", width: "38%" } },
-  );
-}
-
 // ─── Auto-TTS + /speak ──────────────────────────────────────────────────────
 
-async function handleAgentEnd(
-  _pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  showOverlay?: boolean,
-): Promise<string | undefined> {
-  if (!settings.autoTts && !pendingSpeakRequest) return;
-
-  // Extract last assistant text
-  var lastAssistantText = "";
+/** Extract the last assistant message text from a session branch. */
+function extractAssistantText(ctx: ExtensionContext): string | undefined {
   try {
-    var branch = ctx.sessionManager.getBranch();
-    for (var i = branch.length - 1; i >= 0; i--) {
-      var entry = branch[i];
+    const branch = ctx.sessionManager.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
       if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
-        var content = entry.message.content;
+        const content = entry.message.content;
         if (typeof content === "string") {
-          lastAssistantText = content;
-        } else if (Array.isArray(content)) {
-          var texts: string[] = [];
-          for (var j = 0; j < content.length; j++) {
-            var part = content[j];
+          return content.trim();
+        }
+        if (Array.isArray(content)) {
+          const texts: string[] = [];
+          for (const part of content) {
             if (part && typeof part === "object" && (part as any).type === "text") {
-              var rawText = (part as any).text;
+              const rawText = (part as any).text;
               if (rawText) texts.push(rawText);
             }
           }
-          lastAssistantText = texts.join("\n");
+          return texts.join("\n").trim();
         }
         break;
       }
     }
   } catch (err: any) {
-    notify(
-      ctx as any,
-      "[pi-voice] Failed to read conversation: " + err.message,
-      "error",
-    );
+    console.error("[pi-voice] Failed to read conversation:", err.message);
+  }
+  return undefined;
+}
+
+/** Build SpeakOptions from the current settings and extension context. */
+function makeSpeakOptions(ctx: ExtensionContext) {
+  return {
+    audio,
+    piper,
+    tldrMode: settings.tldrMode,
+    truncateMaxChars: 300,
+    summarize:
+      settings.tldrMode
+        ? async (text: string) => {
+            const key = await resolveOpenRouterKey(ctx);
+            return summarizeText(key, text, settings.summaryModel);
+          }
+        : undefined,
+  };
+}
+
+/**
+ * /speak command handler: await TTS playback.
+ * Unlike auto-TTS, this blocks until speaking finishes so the user gets
+ * immediate feedback.
+ */
+async function handleSpeakCommand(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  const text = extractAssistantText(ctx as unknown as ExtensionContext);
+  if (!text) {
+    notify(ctx, "No assistant message to speak.", "warning");
     return;
   }
 
-  if (!lastAssistantText.trim()) return;
+  // Refresh detection
+  piper = detectPiper();
+  audio = detectAudioBackends();
 
-  var textToSpeak = lastAssistantText.trim();
+  ctx.ui.setWorkingMessage("Speaking...");
+  ctx.ui.setWorkingVisible(true);
 
-  // TL;DR via OpenRouter, or simple truncation
-  if (settings.tldrMode) {
-    var summarized = false;
-    try {
-      var apiKey = await resolveOpenRouterKey(ctx);
-      var tldr = await summarizeText(apiKey, lastAssistantText, settings.summaryModel);
-      if (tldr && tldr.trim()) {
-        textToSpeak = tldr.trim();
-        summarized = true;
-      }
-    } catch {
-      /* fall through to truncation */
-    }
-    if (!summarized) {
-      textToSpeak = truncateForSpeech(lastAssistantText, 300);
-    }
-  }
-
-  // Speak via piper → espeak fallback (humanize text first)
   try {
-    piper = detectPiper(); // refresh
-    var speechText = humanizeForSpeech(textToSpeak);
-    if (!speechText.trim()) {
-      notify(ctx as any, "Nothing to speak after cleaning.", "warning");
-      return speechText;
+    const speechText = await speakText(
+      text,
+      makeSpeakOptions(ctx as unknown as ExtensionContext),
+    );
+    if (!speechText) {
+      notify(ctx, "Nothing to speak after cleaning.", "warning");
     }
-    if (piper.available && audio.canPlay && audio.player) {
-      var wavPath = await speakWithPiper(speechText, piper);
-      if (showOverlay && ctx.hasUI) {
-        await showSpeakingOverlay(ctx as any, speechText, wavPath);
-      } else {
-        await playWav(wavPath, audio.player);
-      }
-      try { unlinkSync(wavPath); } catch { /* */ }
-    } else if (audio.hasEspeak && audio.canPlay && audio.player) {
-      await speakViaEspeak(speechText, audio.player, 175);
-    }
-    return speechText;
   } catch (err: any) {
-    notify(ctx as any, "TTS failed: " + err.message, "warning");
+    notify(ctx, `TTS failed: ${err.message}`, "warning");
+  } finally {
+    ctx.ui.setWorkingVisible(false);
   }
 }
 
@@ -919,18 +857,21 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("speak", {
     description: "Read the last assistant message aloud (TTS)",
     handler: async (_args, ctx) => {
-      pendingSpeakRequest = true;
-      try {
-        await handleAgentEnd(pi, ctx as unknown as ExtensionContext);
-      } finally {
-        pendingSpeakRequest = false;
-      }
+      await handleSpeakCommand(pi, ctx);
     },
   });
 
-  pi.on("agent_end", async () => {
-    if (!activeCtx) return;
-    await runAsyncSafe(() => handleAgentEnd(pi, activeCtx!));
+  pi.on("agent_end", () => {
+    setImmediate(() => {
+      if (!activeCtx || !settings.autoTts) return;
+      const text = extractAssistantText(activeCtx);
+      if (!text) return;
+      piper = detectPiper();
+      audio = detectAudioBackends();
+      enqueueTts(async () => {
+        await speakText(text, makeSpeakOptions(activeCtx));
+      });
+    });
   });
 }
 
@@ -963,10 +904,3 @@ async function showStartupStatus(
   );
 }
 
-async function runAsyncSafe(fn: () => Promise<void>): Promise<void> {
-  try {
-    await fn();
-  } catch (e: any) {
-    console.error("[pi-voice] auto-TTS error:", e.message);
-  }
-}
