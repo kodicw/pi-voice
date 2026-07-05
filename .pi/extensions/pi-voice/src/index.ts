@@ -406,7 +406,7 @@ async function runVoiceCommand(
   const transcribeMsg = whisper.available
     ? `Transcribing (whisper, ${whisper.modelName})...`
     : `Transcribing (OpenRouter, ${settings.sttModel})...`;
-  const dismissTranscribe = showTopRightStatus(ctx, transcribeMsg, 120000);
+  const dismissTranscribe = showTopRightStatus(ctx, transcribeMsg, 30000);
 
   try {
     if (whisper.available) {
