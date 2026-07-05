@@ -62,6 +62,8 @@ let audio = detectAudioBackends();
 let whisper: WhisperStatus = detectWhisper();
 let piper: PiperStatus = detectPiper();
 let activeCtx: ExtensionContext | undefined;
+/** Last command context with UI access — used for auto-TTS progress overlays. */
+let lastUICtx: ExtensionCommandContext | undefined;
 // ─── Settings Persistence ───────────────────────────────────────────────────
 
 function persistSettings(pi: ExtensionAPI): void {
@@ -959,6 +961,7 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("voice", {
     description: "Record audio, transcribe (whisper.cpp), and send as user message",
     handler: async (_args, ctx) => {
+      lastUICtx = ctx;
       await runVoiceCommand(pi, ctx);
     },
   });
@@ -966,6 +969,7 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("voice-diagnose", {
     description: "Test recorder, player, whisper, piper, espeak, and OpenRouter",
     handler: async (_args, ctx) => {
+      lastUICtx = ctx;
       await runVoiceDiagnose(pi, ctx);
     },
   });
@@ -973,6 +977,7 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("voice-settings", {
     description: "Configure voice/TTS settings",
     handler: async (_args, ctx) => {
+      lastUICtx = ctx;
       await runVoiceSettings(pi, ctx);
     },
   });
@@ -980,6 +985,7 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("speak", {
     description: "Read the last assistant message aloud (TTS)",
     handler: async (_args, ctx) => {
+      lastUICtx = ctx;
       await handleSpeakCommand(pi, ctx);
     },
   });
@@ -991,9 +997,27 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
       if (!text) return;
       piper = detectPiper();
       audio = detectAudioBackends();
+      const ui = lastUICtx;
+
+      let autoTtsDismiss: (() => void) | null = null;
+
       enqueueTts(async () => {
+        if (ui) {
+          const summaryModel = getEffectiveSummaryModel(activeCtx!);
+          autoTtsDismiss = showTopRightStatus(ui, `Summarizing (${summaryModel})...`, 30000);
+        }
         await speakText(text, {
           ...makeSpeakOptions(activeCtx),
+          onStatus: (status: string) => {
+            if (!ui) return;
+            if (status === "speaking") {
+              autoTtsDismiss?.();
+              autoTtsDismiss = showTopRightStatus(ui, "Speaking...", 30000);
+            } else if (status === "done") {
+              autoTtsDismiss?.();
+              autoTtsDismiss = null;
+            }
+          },
         });
       });
     });
