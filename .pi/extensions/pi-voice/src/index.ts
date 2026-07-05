@@ -15,7 +15,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, type OverlayHandle } from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { unlinkSync } from "node:fs";
@@ -118,17 +118,29 @@ async function hasOpenRouterKey(
   }
 }
 
-// ─── UI helpers (top-right overlays for all feedback) ──────────────────────
-
-/** Tracks the last status overlay so we can dismiss it before showing a new one. */
-let lastDismissOverlay: (() => void) | null = null;
-let lastDismissAbort: AbortController | null = null;
+// ─── UI helpers (top-right overlays for all feedback) ──────────────────────────
 
 /**
- * Show a temporary status overlay at the top-right.
- * Returns a dismiss function to close it early.
- * Auto-dismisses after `timeout` ms.
- * Pressing Esc or Enter also dismisses it.
+ * Tracks the last status overlay so we can dismiss it before showing a new one.
+ * Holds the handle (for `hide()`) and the factory's `done` callback (to resolve the custom() promise).
+ */
+let lastDismissOverlay: (() => void) | null = null;
+let lastOverlayHandle: OverlayHandle | undefined;
+let lastOverlayDone: ((v: undefined) => void) | undefined;
+
+/**
+ * Show a temporary, non-blocking status overlay at the top-right.
+ *
+ * The overlay does NOT capture keyboard input (`nonCapturing: true`), so the
+ * user can keep typing while it is visible. It auto-dismisses after `timeout` ms
+ * and can also be dismissed early via the returned function — which is what
+ * command handlers call the instant transcription / speaking finishes.
+ *
+ * NOTE: pi's `ctx.ui.custom()` options only accept `{ overlay, overlayOptions,
+ * onHandle }`. There is no `signal` or `timeout` option — earlier code passed
+ * those and they were silently ignored, which is why the overlay never
+ * auto-dismissed and blocked input. We now pass `nonCapturing: true` in
+ * `overlayOptions` and manage the timeout ourselves.
  */
 function showTopRightStatus(
   ctx: ExtensionCommandContext,
@@ -139,48 +151,68 @@ function showTopRightStatus(
   if (lastDismissOverlay) {
     try { lastDismissOverlay(); } catch { /* */ }
     lastDismissOverlay = null;
-    lastDismissAbort = null;
+    lastOverlayHandle = undefined;
+    lastOverlayDone = undefined;
   }
 
-  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  let dismissed = false;
+
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    if (timer) { clearTimeout(timer); timer = undefined; }
+    try { lastOverlayHandle?.hide(); } catch { /* */ }
+    try { lastOverlayDone?.(undefined); } catch { /* */ }
+    if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
+    lastOverlayHandle = undefined;
+    lastOverlayDone = undefined;
+  };
 
   if (ctx.hasUI) {
     ctx.ui.custom<string | undefined>(
-      (_tui, theme, _kb, done) => ({
-        render(_width: number): string[] {
-          return [
-            theme.fg("accent", theme.bold("🎤 Voice")),
-            "",
-            message,
-          ];
-        },
-        invalidate() {},
-        handleInput(data: string) {
-          if (matchesKey(data, "escape") || matchesKey(data, "return")) {
-            done(undefined);
-          }
-        },
-      }),
+      (_tui, theme, _kb, done) => {
+        // Stash `done` so we can resolve the custom() promise from dismiss().
+        lastOverlayDone = done as (v: undefined) => void;
+        return {
+          render(_width: number): string[] {
+            return [
+              theme.fg("accent", theme.bold("🎤 Voice")),
+              "",
+              message,
+            ];
+          },
+          invalidate() {},
+          // Non-capturing overlay: input flows to the editor regardless,
+          // so this handler is intentionally a no-op (we never steal keys).
+          handleInput(_data: string) {},
+          dispose() {},
+        };
+      },
       {
         overlay: true,
-        overlayOptions: { anchor: "top-right", width: "28%" },
-        signal: controller.signal,
-        timeout,
+        overlayOptions: { anchor: "top-right", width: "28%", nonCapturing: true },
+        onHandle: (handle) => {
+          lastOverlayHandle = handle;
+          // If dismiss() raced ahead of onHandle, hide now.
+          if (dismissed) { try { handle.hide(); } catch { /* */ } }
+        },
       },
     ).then(() => {
-      if (lastDismissAbort === controller) lastDismissAbort = null;
+      // Promise resolved (by our done() or by pi tearing it down). Clean up tracking.
       if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
+      lastOverlayHandle = undefined;
+      lastOverlayDone = undefined;
     }).catch(() => {
-      if (lastDismissAbort === controller) lastDismissAbort = null;
       if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
+      lastOverlayHandle = undefined;
+      lastOverlayDone = undefined;
     });
+
+    // Safety-net timeout (pi's custom() has no built-in timeout option).
+    timer = setTimeout(() => { try { dismiss(); } catch { /* */ } }, timeout);
   }
 
-  const dismiss = () => {
-    try { controller.abort(); } catch { /* */ }
-  };
-
-  lastDismissAbort = controller;
   lastDismissOverlay = dismiss;
   return dismiss;
 }
@@ -401,7 +433,7 @@ async function runVoiceCommand(
   const transcribeMsg = whisper.available
     ? `Transcribing (whisper, ${whisper.modelName})...`
     : `Transcribing (OpenRouter, ${settings.sttModel})...`;
-  const dismissTranscribe = showTopRightStatus(ctx, transcribeMsg, 30000);
+  const dismissTranscribe = showTopRightStatus(ctx, transcribeMsg, 10000);
 
   try {
     if (whisper.available) {
