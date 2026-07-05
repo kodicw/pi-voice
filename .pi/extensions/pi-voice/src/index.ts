@@ -255,7 +255,7 @@ async function runVoiceCommand(
             const status =
               stopped || autoResolved
                 ? "Processing..."
-                : `Recording ${elapsedSec.toFixed(1)}s / ${maxSeconds}s`;
+                : `Listening... ${elapsedSec.toFixed(1)}s / ${maxSeconds}s`;
             return [
               theme.fg("accent", theme.bold("🎤 Voice Input")),
               "",
@@ -429,10 +429,7 @@ async function runVoiceCommand(
     return;
   }
 
-  // Send as user message
-  const preview =
-    transcript.trim().substring(0, 80) + (transcript.length > 80 ? "..." : "");
-  notifyTopRight(ctx, `🎙️ "${preview}"`, "info");
+  // Send as user message (no overlay — transcription appears as normal user message in conversation)
   try {
     // If streaming, queue as followUp instead of throwing
     if (ctx.isIdle && !ctx.isIdle()) {
@@ -875,13 +872,14 @@ async function handleSpeakCommand(
   let dismissOverlay: (() => void) | null = null;
 
   try {
+    const summaryModel = getEffectiveSummaryModel(ctx as unknown as ExtensionContext);
     const speakOpts = {
       ...makeSpeakOptions(ctx as unknown as ExtensionContext),
       onStatus: (status: string) => {
         switch (status) {
           case "summarizing":
             dismissOverlay?.();
-            dismissOverlay = showTopRightStatus(ctx, "Summarizing response...", 30000);
+            dismissOverlay = showTopRightStatus(ctx, `Summarizing (${summaryModel})...`, 30000);
             break;
           case "speaking":
             dismissOverlay?.();
