@@ -121,7 +121,68 @@ async function hasOpenRouterKey(
   }
 }
 
-// ─── Commander: notify safe ─────────────────────────────────────────────────
+// ─── UI helpers (top-right overlays for all feedback) ──────────────────────
+
+/**
+ * Show a temporary status overlay at the top-right.
+ * Returns a dismiss function to close it early.
+ * Auto-dismisses after `timeout` ms (default 8s) if not dismissed sooner.
+ */
+function showTopRightStatus(
+  ctx: ExtensionCommandContext,
+  message: string,
+  timeout: number = 8000,
+): () => void {
+  const controller = new AbortController();
+  if (ctx.hasUI) {
+    ctx.ui.custom<string | undefined>(
+      (_tui, theme, _kb, done) => ({
+        render(_width: number): string[] {
+          return [
+            theme.fg("accent", theme.bold("🎤 Voice")),
+            "",
+            message,
+          ];
+        },
+        invalidate() {},
+        handleInput(_data: string) {},
+      }),
+      {
+        overlay: true,
+        overlayOptions: { anchor: "top-right", width: "28%" },
+        signal: controller.signal,
+        timeout,
+      },
+    ).catch(() => {});
+  }
+  return () => {
+    try { controller.abort(); } catch { /* */ }
+  };
+}
+
+/**
+ * Show a brief notification overlay at the top-right that auto-dismisses.
+ * Also calls the built-in notify for redundancy.
+ */
+function notifyTopRight(
+  ctx: ExtensionCommandContext,
+  msg: string,
+  type: "info" | "error" | "warning" = "info",
+): void {
+  // Built-in notify as a fallback
+  if (ctx.hasUI) {
+    try {
+      ctx.ui.notify(msg, type);
+    } catch (err: any) {
+      console.error(`[pi-voice] notify failed: ${type}: ${msg} —`, err.message);
+    }
+  }
+  // Top-right overlay for visibility
+  const dismiss = showTopRightStatus(ctx, msg, 3500);
+  setTimeout(dismiss, 3500);
+}
+
+// ─── Legacy notify (kept for non-UI contexts) ───────────────────────────────
 
 function notify(
   ctx: ExtensionCommandContext,
@@ -148,9 +209,9 @@ async function runVoiceCommand(
   whisper = detectWhisper();
 
   if (!audio.canRecord) {
-    notify(
+    notifyTopRight(
       ctx,
-      "[pi-voice] No recorder found. Install: ffmpeg, sox, alsa-utils, or pipewire.",
+      "No recorder found. Install: ffmpeg, sox, alsa-utils, or pipewire.",
       "error",
     );
     return;
@@ -164,7 +225,7 @@ async function runVoiceCommand(
     outPath = getTempPath(audio.recorder!.ext);
     recorderName = audio.recorder!.cmd;
   } catch (err: any) {
-    notify(ctx, `[pi-voice] Failed to create temp file: ${err.message}`, "error");
+    notifyTopRight(ctx, `Failed to create temp file: ${err.message}`, "error");
     return;
   }
 
@@ -174,15 +235,15 @@ async function runVoiceCommand(
     recState = startRecording(audio.recorder!, outPath, maxSeconds);
     currentRecording = recState;
   } catch (err: any) {
-    notify(ctx, `[pi-voice] Failed to start ${recorderName}: ${err.message}`, "error");
+    notifyTopRight(ctx, `Failed to start ${recorderName}: ${err.message}`, "error");
     return;
   }
 
   if (!recState.process || recState.process.killed) {
     currentRecording = null;
-    notify(
+    notifyTopRight(
       ctx,
-      `[pi-voice] ${recorderName} exited immediately. Check microphone is plugged in, not muted, and accessible. Try: ${recorderName} --help`,
+      `${recorderName} exited immediately. Check microphone.`,
       "error",
     );
     try {
@@ -337,12 +398,10 @@ async function runVoiceCommand(
 
   // Transcribe
   let transcript: string;
-  if (whisper.available) {
-    ctx.ui.setWorkingMessage(`Transcribing (whisper, ${whisper.modelName})...`);
-  } else {
-    ctx.ui.setWorkingMessage(`Transcribing (OpenRouter, ${settings.sttModel})...`);
-  }
-  ctx.ui.setWorkingVisible(true);
+  const transcribeMsg = whisper.available
+    ? `Transcribing (whisper, ${whisper.modelName})...`
+    : `Transcribing (OpenRouter, ${settings.sttModel})...`;
+  const dismissTranscribe = showTopRightStatus(ctx, transcribeMsg, 120000);
 
   try {
     if (whisper.available) {
@@ -368,10 +427,10 @@ async function runVoiceCommand(
     try {
       cleanupRecordingDir(wavPath);
     } catch { /* */ }
-    ctx.ui.setWorkingVisible(false);
-    notify(
+    dismissTranscribe();
+    notifyTopRight(
       ctx,
-      `[pi-voice] STT failed: ${err.message}. ${
+      `STT failed: ${err.message}. ${
         whisper.available
           ? "whisper.cpp error — check model file."
           : "OpenRouter error — check API key and model."
@@ -379,14 +438,14 @@ async function runVoiceCommand(
       "error",
     );
     return;
-  } finally {
-    ctx.ui.setWorkingVisible(false);
   }
 
+  dismissTranscribe();
+
   if (!transcript || !transcript.trim()) {
-    notify(
+    notifyTopRight(
       ctx,
-      "[pi-voice] No clear speech detected — too quiet, too short, or unintelligible. Try speaking louder or closer to the mic.",
+      "No clear speech detected — too quiet or unintelligible.",
       "warning",
     );
     return;
@@ -395,7 +454,7 @@ async function runVoiceCommand(
   // Send as user message
   const preview =
     transcript.trim().substring(0, 80) + (transcript.length > 80 ? "..." : "");
-  notify(ctx, `🎙️ "${preview}"`, "info");
+  notifyTopRight(ctx, `🎙️ "${preview}"`, "info");
   try {
     // If streaming, queue as followUp instead of throwing
     if (ctx.isIdle && !ctx.isIdle()) {
@@ -810,7 +869,7 @@ async function handleSpeakCommand(
 ): Promise<void> {
   const text = extractAssistantText(ctx as unknown as ExtensionContext);
   if (!text) {
-    notify(ctx, "No assistant message to speak.", "warning");
+    notifyTopRight(ctx, "No assistant message to speak.", "warning");
     return;
   }
 
@@ -818,8 +877,7 @@ async function handleSpeakCommand(
   piper = detectPiper();
   audio = detectAudioBackends();
 
-  ctx.ui.setWorkingMessage("Preparing speech...");
-  ctx.ui.setWorkingVisible(true);
+  let dismissOverlay: (() => void) | null = null;
 
   try {
     const speakOpts = {
@@ -827,25 +885,31 @@ async function handleSpeakCommand(
       onStatus: (status: string) => {
         switch (status) {
           case "summarizing":
-            ctx.ui.setWorkingMessage("Summarizing response...");
+            dismissOverlay?.();
+            dismissOverlay = showTopRightStatus(ctx, "Summarizing response...", 30000);
             break;
           case "speaking":
-            ctx.ui.setWorkingMessage("Speaking...");
+            dismissOverlay?.();
+            dismissOverlay = showTopRightStatus(ctx, "Speaking...", 30000);
             break;
           case "done":
-            ctx.ui.setWorkingVisible(false);
+            dismissOverlay?.();
+            dismissOverlay = null;
             break;
         }
       },
     };
+    // Initial status
+    dismissOverlay = showTopRightStatus(ctx, "Preparing speech...", 10000);
     const speechText = await speakText(text, speakOpts);
+    dismissOverlay?.();
+    dismissOverlay = null;
     if (!speechText) {
-      notify(ctx, "Nothing to speak after cleaning.", "warning");
+      notifyTopRight(ctx, "Nothing to speak after cleaning.", "warning");
     }
   } catch (err: any) {
-    notify(ctx, `TTS failed: ${err.message}`, "warning");
-  } finally {
-    ctx.ui.setWorkingVisible(false);
+    dismissOverlay?.();
+    notifyTopRight(ctx, `TTS failed: ${err.message}`, "warning");
   }
 }
 
