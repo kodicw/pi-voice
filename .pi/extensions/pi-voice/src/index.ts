@@ -127,6 +127,7 @@ async function hasOpenRouterKey(
 
 /** Tracks the last status overlay so we can dismiss it before showing a new one. */
 let lastDismissOverlay: (() => void) | null = null;
+let lastDismissAbort: AbortController | null = null;
 
 /**
  * Show a temporary status overlay at the top-right.
@@ -143,12 +144,10 @@ function showTopRightStatus(
   if (lastDismissOverlay) {
     try { lastDismissOverlay(); } catch { /* */ }
     lastDismissOverlay = null;
+    lastDismissAbort = null;
   }
 
-  let dismissed = false;
-  const timer = setTimeout(() => {
-    dismissed = true;
-  }, timeout);
+  const controller = new AbortController();
 
   if (ctx.hasUI) {
     ctx.ui.custom<string | undefined>(
@@ -163,36 +162,30 @@ function showTopRightStatus(
         invalidate() {},
         handleInput(data: string) {
           if (matchesKey(data, "escape") || matchesKey(data, "return")) {
-            if (!dismissed) {
-              dismissed = true;
-              clearTimeout(timer);
-              done(undefined);
-            }
+            done(undefined);
           }
         },
       }),
       {
         overlay: true,
         overlayOptions: { anchor: "top-right", width: "28%" },
+        signal: controller.signal,
         timeout,
       },
     ).then(() => {
-      dismissed = true;
-      clearTimeout(timer);
+      if (lastDismissAbort === controller) lastDismissAbort = null;
       if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
     }).catch(() => {
-      dismissed = true;
-      clearTimeout(timer);
+      if (lastDismissAbort === controller) lastDismissAbort = null;
       if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
     });
   }
 
   const dismiss = () => {
-    if (dismissed) return;
-    dismissed = true;
-    clearTimeout(timer);
+    try { controller.abort(); } catch { /* */ }
   };
 
+  lastDismissAbort = controller;
   lastDismissOverlay = dismiss;
   return dismiss;
 }
