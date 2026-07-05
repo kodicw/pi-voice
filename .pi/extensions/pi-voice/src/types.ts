@@ -31,10 +31,6 @@ export interface AudioPlayer {
 
 /** Extension settings persisted to session */
 export interface VoiceSettings {
-  /** Enable auto-TTS after each agent response */
-  autoTts: boolean;
-  /** Prefer local AI (whisper, piper, ollama) over OpenRouter */
-  localMode: boolean;
   /** OpenRouter model for STT (audio-capable) */
   sttModel: string;
   /** Max recording duration in seconds */
@@ -45,8 +41,6 @@ export interface VoiceSettings {
 
 /** Default settings */
 export const DEFAULT_SETTINGS: VoiceSettings = {
-  autoTts: false,
-  localMode: true,
   sttModel: "openai/whisper-large-v3",
   maxRecordSeconds: 60,
   language: "en",

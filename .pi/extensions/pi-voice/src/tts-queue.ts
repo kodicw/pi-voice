@@ -1,8 +1,8 @@
 /**
  * Fire-and-forget TTS background queue + shared speakText pipeline.
  *
- * Extracts the common TTS logic (humanize → summarize/truncate → piper/espeak → play)
- * so both the auto-TTS hook and the /speak command share one code path.
+ * Extracts the common TTS logic (humanize → truncate → piper/espeak → play)
+ * so any caller can share one code path.
  *
  * The background queue serialises TTS playback so audio never overlaps,
  * and catches all errors so a background failure never crashes the agent.
@@ -22,20 +22,13 @@ export interface SpeakOptions {
   audio: AudioBackends;
   /** Piper status (neural TTS) */
   piper: PiperStatus;
-  /** Whether to use TL;DR summarisation */
-  tldrMode: boolean;
-  /** Already-summarised text (if summarisation was done upstream) */
-  summarizedText?: string;
-  /** Optional summarizer — called with text, returns summary string */
-  summarize?: (text: string) => Promise<string>;
   /** Override the speed for espeak (default 175) */
   espeakSpeed?: number;
   /** Override max chars for truncation fallback (default 300) */
   truncateMaxChars?: number;
   /**
    * Optional callback for progress updates.
-   * Called with a short status label at each stage ("summarizing", "speaking", "done", etc.).
-   * Command handlers use this to update ctx.ui.setWorkingMessage().
+   * Called with a short status label at each stage ("speaking", "done", etc.).
    */
   onStatus?: (status: string) => void;
 }
@@ -46,7 +39,6 @@ type Task = () => Promise<void>;
 
 let queue: Task[] = [];
 let running = false;
-let taskId = 0;
 
 async function processQueue(): Promise<void> {
   if (running) return;
@@ -87,8 +79,8 @@ export function clearPendingTts(): void {
 /**
  * Speak the given text using the best available TTS backend.
  *
- * 1. Humanize the text (strip markdown, emoji, URLs, etc.)
- * 2. Truncate if too long (or use pre-summarized text)
+ * 1. Truncate if too long
+ * 2. Humanize the text (strip markdown, emoji, URLs, etc.)
  * 3. Play via piper (neural) → espeak-ng (fallback)
  *
  * Returns the humanized speech text that was (or will be) spoken.
@@ -100,22 +92,7 @@ export async function speakText(
   const status = options.onStatus ?? (() => {});
   let textToSpeak = text;
 
-  // Step 1: Summarize or truncate
-  if (options.summarizedText) {
-    textToSpeak = options.summarizedText;
-  } else if (options.tldrMode && options.summarize) {
-    status("summarizing");
-    try {
-      const summary = await options.summarize(text);
-      if (summary && summary.trim()) {
-        textToSpeak = summary.trim();
-      }
-    } catch {
-      // Fall through to truncation
-    }
-  }
-
-  // Truncation fallback (if text is still long)
+  // Step 1: Truncate if too long
   if (textToSpeak.length > (options.truncateMaxChars ?? 300)) {
     textToSpeak = truncateForSpeech(textToSpeak, options.truncateMaxChars ?? 300);
   }

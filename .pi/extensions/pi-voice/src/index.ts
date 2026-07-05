@@ -3,12 +3,11 @@
  *
  * /voice            Record → transcribe (whisper.cpp) → send user message
  * /voice-diagnose   Health check every subsystem
- * /voice-settings   Toggle auto-TTS, TL;DR, configure models
- * /speak            Read last assistant message aloud (piper → espeak)
+ * /voice-settings   Configure STT model, record duration, language
+ * /speak            Read the last couple of assistant messages aloud (piper → espeak)
  *
  * STT:  whisper.cpp (local)  → OpenRouter (fallback)
  * TTS:  piper-tts (local)    → espeak-ng (fallback)
- * TL;DR: OpenRouter (cloud)  → simple truncation (fallback)
  */
 
 import type {
@@ -21,7 +20,6 @@ import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { unlinkSync } from "node:fs";
 import { cpus } from "node:os";
-import { summarizeText } from "./openrouter.js";
 import {
   cleanupRecordingDir,
   detectAudioBackends,
@@ -45,7 +43,6 @@ import {
 import { DEFAULT_SETTINGS, type VoiceSettings } from "./types.js";
 import {
   speakText,
-  enqueueTts,
 } from "./tts-queue.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -62,8 +59,6 @@ let audio = detectAudioBackends();
 let whisper: WhisperStatus = detectWhisper();
 let piper: PiperStatus = detectPiper();
 let activeCtx: ExtensionContext | undefined;
-/** Last command context with UI access — used for auto-TTS progress overlays. */
-let lastUICtx: ExtensionCommandContext | undefined;
 // ─── Settings Persistence ───────────────────────────────────────────────────
 
 function persistSettings(pi: ExtensionAPI): void {
@@ -92,7 +87,7 @@ function restoreSettings(_pi: ExtensionAPI, ctx: ExtensionContext): void {
   }
 }
 
-// ─── Auth (OpenRouter — only for summarization) ─────────────────────────────
+// ─── Auth (OpenRouter — only for STT fallback) ─────────────────────────────
 
 async function resolveOpenRouterKey(
   ctx?: ExtensionContext | ExtensionCommandContext,
@@ -572,13 +567,13 @@ async function runVoiceDiagnose(
     push("espeak-ng not found. No TTS fallback available.", "warn");
   }
 
-  // --- OpenRouter (summarization only) ---
+  // --- OpenRouter (STT fallback only) ---
   const hasKey = await hasOpenRouterKey(ctx);
   if (hasKey) {
-    push("OpenRouter: key present (for TL;DR summarization)");
+    push("OpenRouter: key present (for STT fallback)");
   } else {
     push(
-      "OpenRouter: no key. TL;DR mode will use simple truncation instead. Run /login openrouter to enable cloud summarization.",
+      "OpenRouter: no key. STT fallback to cloud unavailable. Run /login openrouter to enable.",
       "warn",
     );
   }
@@ -676,12 +671,8 @@ async function runVoiceSettings(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   if (!ctx.hasUI) {
-    const eff = getEffectiveSummaryModel(ctx);
     console.log("Voice Settings (print mode):");
-    console.log(`  autoTts:          ${settings.autoTts}`);
-    console.log(`  tldrMode:         ${settings.tldrMode}`);
     console.log(`  sttModel:         ${settings.sttModel}`);
-    console.log(`  summaryModel:     ${eff}  (fallback: ${settings.summaryModel})`);
     console.log(`  maxRecordSeconds: ${settings.maxRecordSeconds}`);
     console.log(`  language:         ${settings.language}`);
     return;
@@ -690,10 +681,7 @@ async function runVoiceSettings(
   type Item = { id: keyof VoiceSettings; label: string; value: string };
 
   const items: Item[] = [
-    { id: "autoTts", label: "Auto TTS", value: String(settings.autoTts) },
-    { id: "tldrMode", label: "TL;DR mode", value: String(settings.tldrMode) },
     { id: "sttModel", label: "STT model (cloud fallback)", value: settings.sttModel },
-    { id: "summaryModel", label: "Summary model", value: getEffectiveSummaryModel(ctx) },
     { id: "maxRecordSeconds", label: "Max record (s)", value: String(settings.maxRecordSeconds) },
     { id: "language", label: "Language", value: settings.language },
   ];
@@ -744,10 +732,7 @@ async function runVoiceSettings(
           if (editing) {
             if (matchesKey(data, "return")) {
               const item = items[selected];
-              if (item.id === "autoTts" || item.id === "tldrMode") {
-                (settings as any)[item.id] =
-                  editBuffer.toLowerCase() === "true";
-              } else if (item.id === "maxRecordSeconds") {
+              if (item.id === "maxRecordSeconds") {
                 const n = parseInt(editBuffer, 10);
                 if (!isNaN(n) && n > 0) (settings as any)[item.id] = n;
               } else {
@@ -773,13 +758,8 @@ async function runVoiceSettings(
             selected = Math.min(items.length - 1, selected + 1);
           } else if (matchesKey(data, "return")) {
             const item = items[selected];
-            if (item.id === "autoTts" || item.id === "tldrMode") {
-              (settings as any)[item.id] = !(settings as any)[item.id];
-              item.value = String((settings as any)[item.id]);
-            } else {
-              editing = true;
-              editBuffer = String((settings as any)[item.id]);
-            }
+            editing = true;
+            editBuffer = String((settings as any)[item.id]);
           } else if (matchesKey(data, "escape")) {
             done("saved");
           }
@@ -795,100 +775,52 @@ async function runVoiceSettings(
   }
 }
 
-// ─── Auto-TTS + /speak ──────────────────────────────────────────────────────
+// ─── /speak ─────────────────────────────────────────────────────────────
 
-/** Extract the last assistant message text from a session branch. */
-function extractAssistantText(ctx: ExtensionContext): string | undefined {
-  try {
-    const branch = ctx.sessionManager.getBranch();
-    for (let i = branch.length - 1; i >= 0; i--) {
-      const entry = branch[i];
-      if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
-        const content = entry.message.content;
-        if (typeof content === "string") {
-          return content.trim();
-        }
-        if (Array.isArray(content)) {
-          const texts: string[] = [];
-          for (const part of content) {
-            if (part && typeof part === "object" && (part as any).type === "text") {
-              const rawText = (part as any).text;
-              if (rawText) texts.push(rawText);
-            }
-          }
-          return texts.join("\n").trim();
-        }
-        break;
+/** Pull the plain text out of a message content (string or content-part array). */
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const part of content) {
+      if (part && typeof part === "object" && (part as any).type === "text") {
+        const rawText = (part as any).text;
+        if (rawText) texts.push(rawText);
       }
     }
+    return texts.join("\n");
+  }
+  return "";
+}
+
+/** Extract the last `count` assistant messages, joined with a blank line. */
+function extractLastAssistantMessages(ctx: ExtensionContext, count = 2): string | undefined {
+  try {
+    const branch = ctx.sessionManager.getBranch();
+    const collected: string[] = [];
+    for (let i = branch.length - 1; i >= 0 && collected.length < count; i--) {
+      const entry = branch[i];
+      if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
+        const text = messageText(entry.message.content).trim();
+        if (text) collected.unshift(text);
+      }
+    }
+    if (collected.length === 0) return undefined;
+    return collected.join("\n\n");
   } catch (err: any) {
     console.error("[pi-voice] Failed to read conversation:", err.message);
   }
   return undefined;
 }
 
-/** Build SpeakOptions from the current settings and extension context. */
-function makeSpeakOptions(ctx: ExtensionContext) {
-  return {
-    audio,
-    piper,
-    tldrMode: settings.tldrMode,
-    truncateMaxChars: 300,
-    summarize:
-      settings.tldrMode
-        ? async (text: string) => {
-            const key = await resolveOpenRouterKey(ctx);
-            const model = resolveSummaryModel(ctx);
-            return summarizeText(key, text, model);
-          }
-        : undefined,
-  };
-}
-
-/**
- * Resolve the model to use for TL;DR summarization.
- * Prefers pi's currently active model, falls back to settings.summaryModel.
- */
-function resolveSummaryModel(ctx: ExtensionContext): string {
-  try {
-    const currentModel = ctx.getModel();
-    if (currentModel?.id) {
-      return currentModel.id;
-    }
-  } catch {
-    // Ignore errors accessing the model registry
-  }
-  return settings.summaryModel;
-}
-
-/**
- * Get a human-readable string showing the effective summary model.
- * Returns something like "auto (deepseek-v4-flash)" or "openai/gpt-4o-mini" (fallback).
- */
-function getEffectiveSummaryModel(ctx: ExtensionContext): string {
-  try {
-    const currentModel = ctx.getModel();
-    if (currentModel?.id) {
-      return `auto (${currentModel.id})`;
-    }
-  } catch {
-    // Ignore
-  }
-  return `${settings.summaryModel} (fallback)`;
-}
-
-/**
- * /speak command handler: await TTS playback.
- * Unlike auto-TTS, this blocks until speaking finishes so the user gets
- * immediate feedback.
- */
+/** /speak command handler: read the last couple of assistant messages aloud. */
 async function handleSpeakCommand(
-  pi: ExtensionAPI,
+  _pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  const text = extractAssistantText(ctx as unknown as ExtensionContext);
+  const text = extractLastAssistantMessages(ctx as unknown as ExtensionContext, 2);
   if (!text) {
-    notifyTopRight(ctx, "No assistant message to speak.", "warning");
+    notifyTopRight(ctx, "No assistant messages to speak.", "warning");
     return;
   }
 
@@ -897,31 +829,18 @@ async function handleSpeakCommand(
   audio = detectAudioBackends();
 
   let dismissOverlay: (() => void) | null = null;
-
   try {
-    const summaryModel = getEffectiveSummaryModel(ctx as unknown as ExtensionContext);
-    const speakOpts = {
-      ...makeSpeakOptions(ctx as unknown as ExtensionContext),
+    dismissOverlay = showTopRightStatus(ctx, "Speaking...", 30000);
+    const speechText = await speakText(text, {
+      audio,
+      piper,
       onStatus: (status: string) => {
-        switch (status) {
-          case "summarizing":
-            dismissOverlay?.();
-            dismissOverlay = showTopRightStatus(ctx, `Summarizing (${summaryModel})...`, 30000);
-            break;
-          case "speaking":
-            dismissOverlay?.();
-            dismissOverlay = showTopRightStatus(ctx, "Speaking...", 30000);
-            break;
-          case "done":
-            dismissOverlay?.();
-            dismissOverlay = null;
-            break;
+        if (status === "done") {
+          dismissOverlay?.();
+          dismissOverlay = null;
         }
       },
-    };
-    // Initial status
-    dismissOverlay = showTopRightStatus(ctx, "Preparing speech...", 10000);
-    const speechText = await speakText(text, speakOpts);
+    });
     dismissOverlay?.();
     dismissOverlay = null;
     if (!speechText) {
@@ -954,7 +873,6 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("voice", {
     description: "Record audio, transcribe (whisper.cpp), and send as user message",
     handler: async (_args, ctx) => {
-      lastUICtx = ctx;
       await runVoiceCommand(pi, ctx);
     },
   });
@@ -962,59 +880,24 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   pi.registerCommand("voice-diagnose", {
     description: "Test recorder, player, whisper, piper, espeak, and OpenRouter",
     handler: async (_args, ctx) => {
-      lastUICtx = ctx;
       await runVoiceDiagnose(pi, ctx);
     },
   });
 
   pi.registerCommand("voice-settings", {
-    description: "Configure voice/TTS settings",
+    description: "Configure voice settings",
     handler: async (_args, ctx) => {
-      lastUICtx = ctx;
       await runVoiceSettings(pi, ctx);
     },
   });
 
   pi.registerCommand("speak", {
-    description: "Read the last assistant message aloud (TTS)",
+    description: "Read the last couple of assistant messages aloud (TTS)",
     handler: async (_args, ctx) => {
-      lastUICtx = ctx;
       await handleSpeakCommand(pi, ctx);
     },
   });
 
-  pi.on("agent_end", () => {
-    setImmediate(() => {
-      if (!activeCtx || !settings.autoTts) return;
-      const text = extractAssistantText(activeCtx);
-      if (!text) return;
-      piper = detectPiper();
-      audio = detectAudioBackends();
-      const ui = lastUICtx;
-
-      let autoTtsDismiss: (() => void) | null = null;
-
-      enqueueTts(async () => {
-        if (ui) {
-          const summaryModel = getEffectiveSummaryModel(activeCtx!);
-          autoTtsDismiss = showTopRightStatus(ui, `Summarizing (${summaryModel})...`, 30000);
-        }
-        await speakText(text, {
-          ...makeSpeakOptions(activeCtx),
-          onStatus: (status: string) => {
-            if (!ui) return;
-            if (status === "speaking") {
-              autoTtsDismiss?.();
-              autoTtsDismiss = showTopRightStatus(ui, "Speaking...", 30000);
-            } else if (status === "done") {
-              autoTtsDismiss?.();
-              autoTtsDismiss = null;
-            }
-          },
-        });
-      });
-    });
-  });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

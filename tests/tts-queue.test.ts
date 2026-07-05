@@ -55,7 +55,6 @@ function makeOptions(overrides: Partial<SpeakOptions> = {}): SpeakOptions {
   return {
     audio: defaultAudio,
     piper: defaultPiper,
-    tldrMode: false,
     truncateMaxChars: 300,
     ...overrides,
   };
@@ -186,22 +185,6 @@ describe("speakText", () => {
 
     expect(speakViaEspeak).toHaveBeenCalled();
     expect(speakWithPiper).not.toHaveBeenCalled();
-  });
-
-  it("uses pre-summarized text when provided", async () => {
-    (humanizeForSpeech as ReturnType<typeof vi.fn>).mockReturnValue("summary text");
-    (speakWithPiper as ReturnType<typeof vi.fn>).mockResolvedValue("/tmp/test.wav");
-    (playWav as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
-
-    const mod = await import("../.pi/extensions/pi-voice/src/tts-queue.ts");
-    // Even though tldrMode is false, summarizedText should be used
-    await mod.speakText("Very long text here", makeOptions({
-      summarizedText: "summary text",
-    }));
-
-    // truncateForSpeech should NOT be called when summarizedText is provided
-    expect(truncateForSpeech).not.toHaveBeenCalled();
-    expect(humanizeForSpeech).toHaveBeenCalledWith("summary text");
   });
 
   it("returns empty string when humanized text is empty", async () => {
