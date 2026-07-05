@@ -162,41 +162,19 @@ function showTopRightStatus(
 
 /**
  * Show a brief notification overlay at the top-right that auto-dismisses.
- * Also calls the built-in notify for redundancy.
+ * Does NOT use the built-in notify — overlays only, no logs or user-visible
+ * console output.
  */
 function notifyTopRight(
   ctx: ExtensionCommandContext,
   msg: string,
   type: "info" | "error" | "warning" = "info",
 ): void {
-  // Built-in notify as a fallback
-  if (ctx.hasUI) {
-    try {
-      ctx.ui.notify(msg, type);
-    } catch (err: any) {
-      console.error(`[pi-voice] notify failed: ${type}: ${msg} —`, err.message);
-    }
-  }
-  // Top-right overlay for visibility
   const dismiss = showTopRightStatus(ctx, msg, 3500);
   setTimeout(dismiss, 3500);
 }
 
-// ─── Legacy notify (kept for non-UI contexts) ───────────────────────────────
 
-function notify(
-  ctx: ExtensionCommandContext,
-  msg: string,
-  type: "info" | "error" | "warning" = "info",
-): void {
-  if (ctx.hasUI) {
-    try {
-      ctx.ui.notify(msg, type);
-    } catch (err: any) {
-      console.error(`[pi-voice] notify failed: ${type}: ${msg} —`, err.message);
-    }
-  }
-}
 
 // ─── /voice ─────────────────────────────────────────────────────────────────
 
@@ -305,7 +283,7 @@ async function runVoiceCommand(
       await stopRecording(recState);
     } catch { /* */ }
     currentRecording = null;
-    notify(ctx, `[pi-voice] Overlay error: ${err.message}`, "error");
+    notifyTopRight(ctx, `Overlay error: ${err.message}`, "error");
     return;
   }
 
@@ -316,7 +294,7 @@ async function runVoiceCommand(
     currentRecording = null;
   } catch (err: any) {
     currentRecording = null;
-    notify(ctx, `[pi-voice] Error stopping recorder: ${err.message}`, "error");
+    notifyTopRight(ctx, `Error stopping recorder: ${err.message}`, "error");
     try {
       cleanupRecordingDir(outPath);
     } catch { /* */ }
@@ -328,16 +306,16 @@ async function runVoiceCommand(
     try {
       cleanupRecordingDir(recordedPath);
     } catch { /* */ }
-    notify(ctx, "Recording cancelled.", "info");
+    notifyTopRight(ctx, "Recording cancelled.", "info");
     return;
   }
   if (!userAction || (userAction !== "stop" && userAction !== "cancel")) {
     try {
       cleanupRecordingDir(recordedPath);
     } catch { /* */ }
-    notify(
+    notifyTopRight(
       ctx,
-      "[pi-voice] Recorder exited unexpectedly. Check microphone permissions.",
+      "Recorder exited unexpectedly. Check microphone permissions.",
       "error",
     );
     return;
@@ -365,15 +343,15 @@ async function runVoiceCommand(
       cleanupRecordingDir(recordedPath);
     } catch { /* */ }
     if (fileSize === 0) {
-      notify(
+      notifyTopRight(
         ctx,
-        `[pi-voice] ${recorderName} produced empty file. Mic may be muted, wrong device, or ALSA/PipeWire not running. Try /voice-diagnose.`,
+        `${recorderName} produced empty file. Mic may be muted.`,
         "error",
       );
     } else {
-      notify(
+      notifyTopRight(
         ctx,
-        "[pi-voice] Recording too short (<1KB). Try speaking louder or closer.",
+        "Recording too short (<1KB). Try speaking louder.",
         "warning",
       );
     }
@@ -388,9 +366,9 @@ async function runVoiceCommand(
     try {
       cleanupRecordingDir(recordedPath);
     } catch { /* */ }
-    notify(
+    notifyTopRight(
       ctx,
-      `[pi-voice] Audio conversion failed: ${err.message}. Install ffmpeg or sox.`,
+      `Audio conversion failed: ${err.message}. Install ffmpeg or sox.`,
       "error",
     );
     return;
@@ -463,7 +441,7 @@ async function runVoiceCommand(
       pi.sendUserMessage(transcript.trim());
     }
   } catch (err: any) {
-    notify(ctx, `[pi-voice] Failed to send message: ${err.message}`, "error");
+    notifyTopRight(ctx, `Failed to send message: ${err.message}`, "error");
   }
 }
 
@@ -788,7 +766,7 @@ async function runVoiceSettings(
 
   if (result === "saved") {
     persistSettings(pi);
-    notify(ctx, "Voice settings saved.", "info");
+    notifyTopRight(ctx, "Voice settings saved.", "info");
   }
 }
 
@@ -967,12 +945,8 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
       piper = detectPiper();
       audio = detectAudioBackends();
       enqueueTts(async () => {
-        console.log("[pi-voice] Auto-TTS: starting TTS playback...");
         await speakText(text, {
           ...makeSpeakOptions(activeCtx),
-          onStatus: (status: string) => {
-            console.log(`[pi-voice] Auto-TTS: ${status}`);
-          },
         });
       });
     });
@@ -1001,10 +975,9 @@ async function showStartupStatus(
     parts.push("cloud —");
   }
 
-  notify(
-    ctx as any,
-    `Voice: ${parts.join(" | ")}  •  /voice-diagnose for details`,
-    "info",
-  );
+  try {
+    // On session_start we don't have a UI-capable context, so just log
+    console.log(`[pi-voice] ${parts.join(" | ")} — /voice-diagnose for details`);
+  } catch { /* */ }
 }
 
