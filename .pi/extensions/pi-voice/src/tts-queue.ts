@@ -32,6 +32,12 @@ export interface SpeakOptions {
   espeakSpeed?: number;
   /** Override max chars for truncation fallback (default 300) */
   truncateMaxChars?: number;
+  /**
+   * Optional callback for progress updates.
+   * Called with a short status label at each stage ("summarizing", "speaking", "done", etc.).
+   * Command handlers use this to update ctx.ui.setWorkingMessage().
+   */
+  onStatus?: (status: string) => void;
 }
 
 // ─── Background TTS Queue ───────────────────────────────────────────────────
@@ -91,12 +97,14 @@ export async function speakText(
   text: string,
   options: SpeakOptions,
 ): Promise<string> {
+  const status = options.onStatus ?? (() => {});
   let textToSpeak = text;
 
   // Step 1: Summarize or truncate
   if (options.summarizedText) {
     textToSpeak = options.summarizedText;
   } else if (options.tldrMode && options.summarize) {
+    status("summarizing");
     try {
       const summary = await options.summarize(text);
       if (summary && summary.trim()) {
@@ -114,14 +122,19 @@ export async function speakText(
 
   // Step 2: Humanize for speech
   const speechText = humanizeForSpeech(textToSpeak);
-  if (!speechText.trim()) return "";
+  if (!speechText.trim()) {
+    status("empty");
+    return "";
+  }
 
   // Step 3: Play audio
   if (!options.audio.canPlay || !options.audio.player) {
     console.warn("[pi-voice] No audio player available for TTS.");
+    status("done");
     return speechText;
   }
 
+  status("speaking");
   if (options.piper.available) {
     try {
       const wavPath = await speakWithPiper(speechText, options.piper);
@@ -139,6 +152,7 @@ export async function speakText(
     await speakViaEspeak(speechText, options.audio.player, options.espeakSpeed ?? 175);
   }
 
+  status("done");
   return speechText;
 }
 

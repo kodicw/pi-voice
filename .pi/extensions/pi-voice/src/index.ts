@@ -337,7 +337,11 @@ async function runVoiceCommand(
 
   // Transcribe
   let transcript: string;
-  ctx.ui.setWorkingMessage("Transcribing...");
+  if (whisper.available) {
+    ctx.ui.setWorkingMessage(`Transcribing (whisper, ${whisper.modelName})...`);
+  } else {
+    ctx.ui.setWorkingMessage(`Transcribing (OpenRouter, ${settings.sttModel})...`);
+  }
   ctx.ui.setWorkingVisible(true);
 
   try {
@@ -772,10 +776,27 @@ function makeSpeakOptions(ctx: ExtensionContext) {
       settings.tldrMode
         ? async (text: string) => {
             const key = await resolveOpenRouterKey(ctx);
-            return summarizeText(key, text, settings.summaryModel);
+            const model = resolveSummaryModel(ctx);
+            return summarizeText(key, text, model);
           }
         : undefined,
   };
+}
+
+/**
+ * Resolve the model to use for TL;DR summarization.
+ * Prefers pi's currently active model, falls back to settings.summaryModel.
+ */
+function resolveSummaryModel(ctx: ExtensionContext): string {
+  try {
+    const currentModel = ctx.getModel();
+    if (currentModel?.id) {
+      return currentModel.id;
+    }
+  } catch {
+    // Ignore errors accessing the model registry
+  }
+  return settings.summaryModel;
 }
 
 /**
@@ -797,14 +818,27 @@ async function handleSpeakCommand(
   piper = detectPiper();
   audio = detectAudioBackends();
 
-  ctx.ui.setWorkingMessage("Speaking...");
+  ctx.ui.setWorkingMessage("Preparing speech...");
   ctx.ui.setWorkingVisible(true);
 
   try {
-    const speechText = await speakText(
-      text,
-      makeSpeakOptions(ctx as unknown as ExtensionContext),
-    );
+    const speakOpts = {
+      ...makeSpeakOptions(ctx as unknown as ExtensionContext),
+      onStatus: (status: string) => {
+        switch (status) {
+          case "summarizing":
+            ctx.ui.setWorkingMessage("Summarizing response...");
+            break;
+          case "speaking":
+            ctx.ui.setWorkingMessage("Speaking...");
+            break;
+          case "done":
+            ctx.ui.setWorkingVisible(false);
+            break;
+        }
+      },
+    };
+    const speechText = await speakText(text, speakOpts);
     if (!speechText) {
       notify(ctx, "Nothing to speak after cleaning.", "warning");
     }
@@ -869,7 +903,13 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
       piper = detectPiper();
       audio = detectAudioBackends();
       enqueueTts(async () => {
-        await speakText(text, makeSpeakOptions(activeCtx));
+        console.log("[pi-voice] Auto-TTS: starting TTS playback...");
+        await speakText(text, {
+          ...makeSpeakOptions(activeCtx),
+          onStatus: (status: string) => {
+            console.log(`[pi-voice] Auto-TTS: ${status}`);
+          },
+        });
       });
     });
   });
