@@ -1,13 +1,11 @@
 /**
- * pi-voice ≥2.0 — Local speech-to-text and text-to-speech for pi
+ * pi-voice ≥2.0 — Local speech-to-text for pi
  *
  * /voice            Record → transcribe (whisper.cpp) → send user message
  * /voice-diagnose   Health check every subsystem
  * /voice-settings   Configure STT model, record duration, language
- * /speak            Read the last couple of assistant messages aloud (piper → espeak)
  *
  * STT:  whisper.cpp (local)  → OpenRouter (fallback)
- * TTS:  piper-tts (local)    → espeak-ng (fallback)
  */
 
 import type {
@@ -16,34 +14,23 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type OverlayHandle } from "@earendil-works/pi-tui";
-import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { unlinkSync } from "node:fs";
 import { cpus } from "node:os";
 import {
   cleanupRecordingDir,
   detectAudioBackends,
   ensureWav,
   getTempPath,
-  playWav,
-  readFileBase64,
-  speakViaEspeak,
   startRecording,
   stopRecording,
 } from "./audio.js";
 import {
-  detectPiper,
   detectWhisper,
   normalizeTranscript,
-  speakWithPiper,
   transcribeWithWhisper,
-  type PiperStatus,
   type WhisperStatus,
 } from "./local.js";
 import { DEFAULT_SETTINGS, type VoiceSettings } from "./types.js";
-import {
-  speakText,
-} from "./tts-queue.js";
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -57,7 +44,6 @@ let settings: VoiceSettings = { ...DEFAULT_SETTINGS };
 let currentRecording: ReturnType<typeof startRecording> | null = null;
 let audio = detectAudioBackends();
 let whisper: WhisperStatus = detectWhisper();
-let piper: PiperStatus = detectPiper();
 let activeCtx: ExtensionContext | undefined;
 // ─── Settings Persistence ───────────────────────────────────────────────────
 
@@ -523,7 +509,6 @@ async function runVoiceDiagnose(
   // Refresh detection
   audio = detectAudioBackends();
   whisper = detectWhisper();
-  piper = detectPiper();
 
   // --- Recorder ---
   if (audio.canRecord && audio.recorder) {
@@ -532,16 +517,6 @@ async function runVoiceDiagnose(
     push(
       "No recorder. Install: sox (rec), alsa-utils (arecord), ffmpeg, or pipewire (pw-record)",
       "fail",
-    );
-  }
-
-  // --- Player ---
-  if (audio.canPlay && audio.player) {
-    push(`Player: ${audio.player.cmd}`);
-  } else {
-    push(
-      "No player. TTS playback won't work. Install: aplay, pw-play, ffplay, mpv, or sox",
-      "warn",
     );
   }
 
@@ -566,37 +541,6 @@ async function runVoiceDiagnose(
       "whisper-cli not found. Install whisper-cpp and run setup-voice-models.",
       "fail",
     );
-  }
-
-  // --- Piper (neural TTS) ---
-  if (piper.available) {
-    push(`Piper TTS: ${piper.voiceName}`);
-  } else if (piper.cli) {
-    push(
-      "piper found but no voice model. Run: setup-voice-models (or download manually to ~/.local/share/piper/)",
-      "warn",
-    );
-  } else {
-    push(
-      "piper not found. Neural TTS unavailable. Install piper-tts for better voice quality.",
-      "warn",
-    );
-  }
-
-  // --- Espeak (fallback TTS) ---
-  if (audio.hasEspeak) {
-    let version = "espeak";
-    try {
-      const out = execFileSync("espeak-ng", ["--version"], {
-        encoding: "utf8",
-        timeout: 2000,
-      });
-      const rawVersion = out.split("\n")[0];
-      version = rawVersion ? rawVersion.trim() : "espeak-ng";
-    } catch { /* */ }
-    push(`Fallback TTS: ${version}`);
-  } else {
-    push("espeak-ng not found. No TTS fallback available.", "warn");
   }
 
   // --- OpenRouter (STT fallback only) ---
@@ -634,24 +578,6 @@ async function runVoiceDiagnose(
     } catch (err: any) {
       if (smoked) try { cleanupRecordingDir(smoked); } catch { /* */ }
       push(`Recording test failed: ${err.message}`, "fail");
-    }
-  }
-
-  if (piper.available && audio.canPlay && audio.player) {
-    try {
-      const wavPath = await speakWithPiper("pi voice test", piper);
-      await playWav(wavPath, audio.player);
-      try { unlinkSync(wavPath); } catch { /* */ }
-      push("Piper TTS test: OK — you should have heard 'pi voice test'");
-    } catch (err: any) {
-      push(`Piper TTS test failed: ${err.message}`, "warn");
-    }
-  } else if (audio.hasEspeak && audio.canPlay && audio.player) {
-    try {
-      await speakViaEspeak("pi voice test", audio.player, 200);
-      push("Espeak TTS test: OK — you should have heard 'pi voice test'");
-    } catch (err: any) {
-      push(`Espeak TTS test failed: ${err.message}`, "warn");
     }
   }
 
@@ -807,89 +733,11 @@ async function runVoiceSettings(
   }
 }
 
-// ─── /speak ─────────────────────────────────────────────────────────────
-
-/** Pull the plain text out of a message content (string or content-part array). */
-function messageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const texts: string[] = [];
-    for (const part of content) {
-      if (part && typeof part === "object" && (part as any).type === "text") {
-        const rawText = (part as any).text;
-        if (rawText) texts.push(rawText);
-      }
-    }
-    return texts.join("\n");
-  }
-  return "";
-}
-
-/** Extract the last `count` assistant messages, joined with a blank line. */
-function extractLastAssistantMessages(ctx: ExtensionContext, count = 2): string | undefined {
-  try {
-    const branch = ctx.sessionManager.getBranch();
-    const collected: string[] = [];
-    for (let i = branch.length - 1; i >= 0 && collected.length < count; i--) {
-      const entry = branch[i];
-      if (entry.type === "message" && entry.message && entry.message.role === "assistant") {
-        const text = messageText(entry.message.content).trim();
-        if (text) collected.unshift(text);
-      }
-    }
-    if (collected.length === 0) return undefined;
-    return collected.join("\n\n");
-  } catch (err: any) {
-    console.error("[pi-voice] Failed to read conversation:", err.message);
-  }
-  return undefined;
-}
-
-/** /speak command handler: read the last couple of assistant messages aloud. */
-async function handleSpeakCommand(
-  _pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-): Promise<void> {
-  const text = extractLastAssistantMessages(ctx as unknown as ExtensionContext, 2);
-  if (!text) {
-    notifyTopRight(ctx, "No assistant messages to speak.", "warning");
-    return;
-  }
-
-  // Refresh detection
-  piper = detectPiper();
-  audio = detectAudioBackends();
-
-  let dismissOverlay: (() => void) | null = null;
-  try {
-    dismissOverlay = showTopRightStatus(ctx, "Speaking...", 30000);
-    const speechText = await speakText(text, {
-      audio,
-      piper,
-      onStatus: (status: string) => {
-        if (status === "done") {
-          dismissOverlay?.();
-          dismissOverlay = null;
-        }
-      },
-    });
-    dismissOverlay?.();
-    dismissOverlay = null;
-    if (!speechText) {
-      notifyTopRight(ctx, "Nothing to speak after cleaning.", "warning");
-    }
-  } catch (err: any) {
-    dismissOverlay?.();
-    notifyTopRight(ctx, `TTS failed: ${err.message}`, "warning");
-  }
-}
-
 // ─── Extension Entry ────────────────────────────────────────────────────────
 
 export default function piVoiceExtension(pi: ExtensionAPI): void {
   audio = detectAudioBackends();
   whisper = detectWhisper();
-  piper = detectPiper();
 
   pi.on("session_start", async (_event, ctx) => {
     activeCtx = ctx;
@@ -910,7 +758,7 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("voice-diagnose", {
-    description: "Test recorder, player, whisper, piper, espeak, and OpenRouter",
+    description: "Test recorder, whisper, and OpenRouter STT",
     handler: async (_args, ctx) => {
       await runVoiceDiagnose(pi, ctx);
     },
@@ -920,13 +768,6 @@ export default function piVoiceExtension(pi: ExtensionAPI): void {
     description: "Configure voice settings",
     handler: async (_args, ctx) => {
       await runVoiceSettings(pi, ctx);
-    },
-  });
-
-  pi.registerCommand("speak", {
-    description: "Read the last couple of assistant messages aloud (TTS)",
-    handler: async (_args, ctx) => {
-      await handleSpeakCommand(pi, ctx);
     },
   });
 
@@ -943,10 +784,6 @@ async function showStartupStatus(
   else parts.push("rec ✗");
   if (whisper.available) parts.push("whisper ✓");
   else parts.push("whisper ✗");
-  if (piper.available) parts.push("piper ✓");
-  else if (audio.hasEspeak) parts.push("espeak ✓");
-  else parts.push("tts ✗");
-
   try {
     const hasKey = await hasOpenRouterKey(ctx);
     parts.push(hasKey ? "cloud ✓" : "cloud —");

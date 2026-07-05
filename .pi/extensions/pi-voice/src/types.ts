@@ -1,32 +1,22 @@
 /**
  * Shared types for the pi-voice extension.
+ *
+ * pi-voice is speech-to-text only: it records audio and transcribes it.
+ * There is no playback path, so AudioBackends tracks only the recorder.
  */
 
 /** Audio backend detection result */
 export interface AudioBackends {
   /** Can record audio */
   canRecord: boolean;
-  /** Can play audio */
-  canPlay: boolean;
   /** Which recorder command to use */
   recorder: AudioRecorder | null;
-  /** Which player command to use */
-  player: AudioPlayer | null;
-  /** Has espeak-ng for TTS */
-  hasEspeak: boolean;
-  /** Has piper for neural TTS */
-  hasPiper: boolean;
 }
 
 export interface AudioRecorder {
   cmd: string;
   args: (outputPath: string, duration?: number) => string[];
   ext: string; // output file extension
-}
-
-export interface AudioPlayer {
-  cmd: string;
-  args: (filePath: string) => string[];
 }
 
 /** Extension settings persisted to session */

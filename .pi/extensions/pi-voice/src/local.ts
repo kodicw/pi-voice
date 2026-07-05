@@ -1,11 +1,10 @@
 /**
- * Local AI backends — no network required for STT/TTS.
+ * Local STT backend — no network required.
  *
  * STT: whisper.cpp (whisper-cli)
- * TTS: piper-tts (neural) → espeak-ng (fallback)
  */
 
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,103 +126,8 @@ export function normalizeTranscript(text: string): string {
   return t.trim();
 }
 
-const PIPER_MODEL_DIRS = [
-  join(homedir(), ".local", "share", "piper"),
-  join(homedir(), "piper-voices"),
-  "/usr/share/piper",
-  "/usr/local/share/piper",
-];
-
-export interface PiperStatus {
-  available: boolean;
-  cli: string | null;
-  modelPath: string | null;
-  configPath: string | null;
-  voiceName: string | null;
-}
-
-export function detectPiper(): PiperStatus {
-  const cli = hasCmd("piper") ? "piper" : null;
-  if (!cli) return { available: false, cli: null, modelPath: null, configPath: null, voiceName: null };
-
-  let best: PiperStatus | null = null;
-  const qualityRank: Record<string, number> = { high: 3, medium: 2, low: 1, x_low: 0 };
-
-  function voiceQuality(voiceName: string): number {
-    const parts = voiceName.split("-");
-    const raw = parts[parts.length - 1];
-    return qualityRank[raw ? raw.toLowerCase() : "medium"] || 1;
-  }
-
-  for (const dir of PIPER_MODEL_DIRS) {
-    if (!existsSync(dir)) continue;
-    try {
-      const entries = execFileSync("ls", [dir], { encoding: "utf8", timeout: 2000 });
-      for (const line of entries.split("\n")) {
-        const file = line.trim();
-        if (!file.endsWith(".onnx")) continue;
-        const voiceName = file.replace(".onnx", "");
-        const modelPath = join(dir, file);
-        const configPath = modelPath.replace(".onnx", ".onnx.json");
-        if (!existsSync(configPath)) continue;
-
-        const rank = voiceQuality(voiceName);
-
-        const candidate: PiperStatus = {
-          available: true,
-          cli,
-          modelPath,
-          configPath,
-          voiceName,
-        };
-
-        const bestRank = best && best.voiceName ? voiceQuality(best.voiceName) : 0;
-
-        if (!best || rank > bestRank) {
-          best = candidate;
-        }
-      }
-    } catch { /* */ }
-  }
-
-  if (best) return best;
-  return { available: false, cli, modelPath: null, configPath: null, voiceName: null };
-}
-
-export async function speakWithPiper(text: string, status: PiperStatus, speedScale: number = 1.0): Promise<string> {
-  if (!status.available || !status.cli || !status.modelPath) {
-    throw new Error("piper not configured. Run setup-voice-models or /voice-diagnose.");
-  }
-
-  const wavPath = join(tmpdir(), `piper-tts-${Date.now()}.wav`);
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      status.cli!,
-      [
-        "-m", status.modelPath!,
-        "-c", status.configPath!,
-        "-f", wavPath,
-        "--length_scale", String(speedScale),
-      ],
-      { stdio: ["pipe", "ignore", "ignore"] },
-    );
-
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`piper exited with ${code}`));
-        return;
-      }
-      resolve(wavPath);
-    });
-
-    proc.stdin.write(text, "utf8");
-    proc.stdin.end();
-  });
-}
-
-// ─── Simple truncation (zero-dependency summary fallback) ────────────────────
+// ─── Simple truncation helper ────────────────────────────────────────────────
+// Kept for unit tests; not used in any runtime path now that TTS is gone.
 
 export function truncateForSpeech(text: string, maxChars: number = 300): string {
   const trimmed = text.trim();

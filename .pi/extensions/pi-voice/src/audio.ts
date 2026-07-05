@@ -1,6 +1,8 @@
 /**
  * Audio backend detection and helpers.
- * Detects available tools for recording, playing, and synthesizing audio.
+ * Detects available tools for recording audio.
+ *
+ * pi-voice is speech-to-text only — there is no playback synthesis path.
  *
  * Performance notes:
  * - pw-record records at 16 kHz (whisper native) to skip conversion
@@ -11,8 +13,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AudioBackends, AudioPlayer, AudioRecorder, RecordingState } from "./types.js";
-import { detectPiper } from "./local.js";
+import type { AudioBackends, AudioRecorder, RecordingState } from "./types.js";
 
 /** Whisper's native sample rate — recording at this avoids resampling */
 const TARGET_RATE = "16000";
@@ -27,22 +28,15 @@ export function hasCmd(cmd: string): boolean {
   }
 }
 
-/** Detect available audio backends */
+/** Detect available audio backends (recorder only — no playback/TTS). */
 export function detectAudioBackends(): AudioBackends {
   const hasFfmpeg = hasCmd("ffmpeg");
-  const hasFfplay = hasCmd("ffplay");
   const hasSox = hasCmd("sox");
   const hasRec = hasCmd("rec");
   const hasArecord = hasCmd("arecord");
-  const hasAplay = hasCmd("aplay");
   const havePulse = hasCmd("pactl");
   const hasPacat = hasCmd("pacat");
   const havePipewire = hasCmd("pw-record");
-  const hasPwPlay = hasCmd("pw-play");
-  const hasEspeakNg = hasCmd("espeak-ng");
-  const hasEspeak = hasCmd("espeak");
-  const hasMpv = hasCmd("mpv");
-  const hasPaplay = hasCmd("paplay");
 
   let recorder: AudioRecorder | null = null;
 
@@ -107,29 +101,9 @@ export function detectAudioBackends(): AudioBackends {
     };
   }
 
-  let player: AudioPlayer | null = null;
-
-  if (hasPwPlay) {
-    player = { cmd: "pw-play", args: (f) => [f] };
-  } else if (hasPaplay) {
-    player = { cmd: "paplay", args: (f) => [f] };
-  } else if (hasAplay) {
-    player = { cmd: "aplay", args: (f) => [f] };
-  } else if (hasFfplay) {
-    player = { cmd: "ffplay", args: (f) => ["-nodisp", "-autoexit", "-loglevel", "error", f] };
-  } else if (hasMpv) {
-    player = { cmd: "mpv", args: (f) => ["--no-video", "--really-quiet", f] };
-  } else if (hasSox) {
-    player = { cmd: "sox", args: (f) => [f, "-d"] };
-  }
-
   return {
     canRecord: recorder !== null,
-    canPlay: player !== null,
     recorder,
-    player,
-    hasEspeak: hasEspeakNg || hasEspeak,
-    hasPiper: detectPiper().available,
   };
 }
 
@@ -265,50 +239,6 @@ export function ensureWav(inputPath: string, ext: string): string {
       try { unlinkSync(inputPath); } catch { /* */ }
     }
   }
-}
-
-export function playWav(path: string, player: AudioPlayer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(player.cmd, player.args(path), { stdio: "ignore" });
-    proc.on("close", (code) => {
-      if (code === 0 || code === null) resolve();
-      else reject(new Error(`${player.cmd} exited with ${code}`));
-    });
-    proc.on("error", reject);
-  });
-}
-
-/** Generate and play TTS via espeak */
-export async function speakViaEspeak(text: string, player?: AudioPlayer, speed: number = 175): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cmd = hasCmd("espeak-ng") ? "espeak-ng" : "espeak";
-    const tmpWav = join(tmpdir(), `pi-voice-tts-${Date.now()}.wav`);
-
-    const gen = spawn(cmd, ["-s", String(speed), "-w", tmpWav, text], {
-      stdio: "ignore",
-    });
-
-    gen.on("close", async (code) => {
-      if (code !== 0) {
-        try { unlinkSync(tmpWav); } catch { /* */ }
-        reject(new Error(`${cmd} exited with ${code}`));
-        return;
-      }
-
-      try {
-        if (player) {
-          await playWav(tmpWav, player);
-        }
-        try { unlinkSync(tmpWav); } catch { /* */ }
-        resolve();
-      } catch (err) {
-        try { unlinkSync(tmpWav); } catch { /* */ }
-        reject(err);
-      }
-    });
-
-    gen.on("error", reject);
-  });
 }
 
 /** Cleanup temp recording directory */

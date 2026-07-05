@@ -1,11 +1,9 @@
 # pi-voice 🎙️
 
-**Local speech-to-text and text-to-speech** for [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent).
+**Local speech-to-text** for [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent).
 
 - **STT**: Speak to your agent — whisper.cpp transcribes locally
-- **TTS**: Hear responses read aloud via neural piper-tts (or espeak-ng fallback)
-- **Auto-summary**: Optionally TL;DR long responses before speaking
-- **100% local**: No cloud needed for voice I/O. Only OpenRouter summarization is optional.
+- **100% local**: No cloud needed for voice input. OpenRouter is an optional STT fallback.
 
 ## Install
 
@@ -22,7 +20,7 @@ pi
 # Expected: "pi-voice" in [Extensions] banner
 ```
 
-> Requires `whisper-cpp`, `piper-tts`, and `espeak-ng` in your PATH.  
+> Requires `whisper-cpp` in your PATH and a recorder (`pw-record`, `rec`/`sox`, `arecord`, or `ffmpeg`).  
 > On NixOS: `nix develop` in the extension directory, or add them to `home.packages`.
 
 ## Quick Start
@@ -37,7 +35,7 @@ pi
 # 3. Record and send speech
 /voice
 
-# 4. Toggle settings
+# 4. Configure settings (STT model, record duration, language)
 /voice-settings
 ```
 
@@ -46,16 +44,13 @@ pi
 | Command | Description |
 |---------|-------------|
 | `/voice` | Record audio → transcribe → send as your message |
-| `/voice-diagnose` | Test every subsystem (recorder, whisper, piper, auth) |
-| `/voice-settings` | Toggle auto-TTS, TL;DR, configure models |
-| `/speak` | Read the last assistant response aloud |
+| `/voice-diagnose` | Test every subsystem (recorder, whisper, OpenRouter) |
+| `/voice-settings` | Configure STT model, max recording duration, language |
 
 ## Features
 
-- **Smart humanizer** — Strips markdown, emoji, URLs, code blocks, and tables from TTS output so speech sounds natural
 - **Hallucination guard** — Filters common whisper.cpp silence hallucinations ("you", "sorry", "thanks") before they reach your conversation
-- **Auto-TTS** — Automatically reads each assistant response after the agent finishes
-- **TL;DR mode** — Summarizes long responses with OpenRouter before speaking (falls back to truncation)
+- **Non-blocking overlays** — Status notifications appear top-right and auto-dismiss; they never block keyboard input
 - **Settings persistence** — Changes survive across sessions
 - **Nix flake** — Full `flake.nix` for reproducible dependency management
 
@@ -64,21 +59,11 @@ pi
 ```
 /voice
   record  →  whisper.cpp  →  normalizeTranscript  →  pi.sendUserMessage()
-
-agent_end
-  extract text → humanizeForSpeech → piper-tts (neural) → pw-play
-                                     ↓ (fallback)
-                                   espeak-ng
-
-TL;DR (optional)
-  OpenRouter summarize → or → truncateForSpeech (when offline)
 ```
 
 | Component | Primary | Fallback |
 |-----------|---------|----------|
-| Speech-to-Text | **whisper.cpp** (local) | OpenRouter `/audio/transcriptions` |
-| Text-to-Speech | **piper-tts** (neural local) | espeak-ng |
-| Summarization | OpenRouter (cloud) | Character truncation |
+| Speech-to-Text | **whisper.cpp** (local) | OpenRouter `/audio/transcriptions` (cloud) |
 
 ## Performance
 
@@ -91,10 +76,9 @@ TL;DR (optional)
 ## Requirements
 
 - **pi-coding-agent** v0.75+
-- **Audio backend**: PipeWire (pw-record/pw-play), ALSA (arecord/aplay), sox, or ffmpeg
+- **Audio backend**: PipeWire (pw-record), ALSA (arecord), sox, or ffmpeg
 - **STT**: `whisper-cpp` + a `ggml-*.bin` model
-- **TTS**: `piper-tts` + an `.onnx` voice model; or `espeak-ng`
-- **Summarization** (optional): OpenRouter API key (`/login openrouter` or `OPENROUTER_API_KEY`)
+- **STT fallback** (optional): OpenRouter API key (`/login openrouter` or `OPENROUTER_API_KEY`)
 
 ## File Structure
 
@@ -104,11 +88,10 @@ TL;DR (optional)
 ├── package.json          # Extension manifest
 ├── README.md             # Detailed extension docs
 └── src/
-    ├── index.ts          # Commands, auto-TTS, settings
-    ├── audio.ts          # Recorder/player detection & helpers
-    ├── local.ts          # Whisper + piper backends
-    ├── openrouter.ts     # Cloud STT + summarization fallback
-    ├── humanize.ts       # Speech-friendly text cleaning
+    ├── index.ts          # Commands, settings
+    ├── audio.ts          # Recorder detection & helpers
+    ├── local.ts          # Whisper backend
+    ├── openrouter.ts     # Cloud STT fallback
     └── types.ts          # Shared types & defaults
 ```
 
