@@ -123,17 +123,31 @@ async function hasOpenRouterKey(
 
 // ─── UI helpers (top-right overlays for all feedback) ──────────────────────
 
+/** Tracks the last status overlay so we can dismiss it before showing a new one. */
+let lastDismissOverlay: (() => void) | null = null;
+
 /**
  * Show a temporary status overlay at the top-right.
  * Returns a dismiss function to close it early.
- * Auto-dismisses after `timeout` ms (default 8s) if not dismissed sooner.
+ * Auto-dismisses after `timeout` ms.
+ * Pressing Esc or Enter also dismisses it.
  */
 function showTopRightStatus(
   ctx: ExtensionCommandContext,
   message: string,
-  timeout: number = 8000,
+  timeout: number = 5000,
 ): () => void {
-  const controller = new AbortController();
+  // Dismiss any previous overlay first
+  if (lastDismissOverlay) {
+    try { lastDismissOverlay(); } catch { /* */ }
+    lastDismissOverlay = null;
+  }
+
+  let dismissed = false;
+  const timer = setTimeout(() => {
+    dismissed = true;
+  }, timeout);
+
   if (ctx.hasUI) {
     ctx.ui.custom<string | undefined>(
       (_tui, theme, _kb, done) => ({
@@ -145,33 +159,51 @@ function showTopRightStatus(
           ];
         },
         invalidate() {},
-        handleInput(_data: string) {},
+        handleInput(data: string) {
+          if (matchesKey(data, "escape") || matchesKey(data, "return")) {
+            if (!dismissed) {
+              dismissed = true;
+              clearTimeout(timer);
+              done(undefined);
+            }
+          }
+        },
       }),
       {
         overlay: true,
         overlayOptions: { anchor: "top-right", width: "28%" },
-        signal: controller.signal,
         timeout,
       },
-    ).catch(() => {});
+    ).then(() => {
+      dismissed = true;
+      clearTimeout(timer);
+      if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
+    }).catch(() => {
+      dismissed = true;
+      clearTimeout(timer);
+      if (lastDismissOverlay === dismiss) lastDismissOverlay = null;
+    });
   }
-  return () => {
-    try { controller.abort(); } catch { /* */ }
+
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    clearTimeout(timer);
   };
+
+  lastDismissOverlay = dismiss;
+  return dismiss;
 }
 
 /**
- * Show a brief notification overlay at the top-right that auto-dismisses.
- * Does NOT use the built-in notify — overlays only, no logs or user-visible
- * console output.
+ * Show a brief notification overlay at the top-right that auto-dismisses (2.5s).
  */
 function notifyTopRight(
   ctx: ExtensionCommandContext,
   msg: string,
-  type: "info" | "error" | "warning" = "info",
+  _type: "info" | "error" | "warning" = "info",
 ): void {
-  const dismiss = showTopRightStatus(ctx, msg, 3500);
-  setTimeout(dismiss, 3500);
+  showTopRightStatus(ctx, msg, 2500);
 }
 
 
